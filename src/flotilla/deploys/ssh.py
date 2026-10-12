@@ -35,6 +35,23 @@ for key in data["remove_pubkeys"]:
                path=f"{home}/.ssh/authorized_keys", line=key,
                present=False, escape_regex_characters=True)
 
+
+
+def ere(text: str) -> str:
+    """Literal text as a POSIX ERE (remote grep -E), without backslashes."""
+    return "".join(f"[{c}]" if c in ".+*?()[]{}|^$" else c for c in text)
+
+
+# Retired private keys: delete the file and any IdentityFile line naming it.
+for keyfile in data["remove_keyfiles"]:
+    path = keyfile.replace("~", home, 1)
+    files.file(name=f"remove {keyfile}", path=path, present=False)
+    files.line(name=f"drop IdentityFile {keyfile}",
+               path=f"{home}/.ssh/config",
+               line=rf"^[[:space:]]*IdentityFile[[:space:]]+"
+                    rf"({ere(keyfile)}|{ere(path)})[[:space:]]*$",
+               extended_regex=True, present=False)
+
 if fact("head -n1 ~/.ssh/config") != include:
     # ssh_config uses the first value it finds, so the include goes first.
     sh("include flotilla.conf first in ~/.ssh/config",

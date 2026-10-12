@@ -17,7 +17,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from . import remote
+from . import paseo, remote
 from .render import Rendered, expand, render
 from .secrets import Resolver
 from .state import Fleet, Host, state_dir
@@ -28,6 +28,7 @@ COMPONENTS = {
     "toolchain": "uv + pnpm and their 7-day release cooldown",
     "omp": "omp config layers, agents, rules, fleet AGENTS.md",
     "netbird": "NetBird client joined with a setup key (new machines)",
+    "paseo": "Host is in the Paseo deploy inventory (build once, copy)",
 }
 RUNS = Path("~/.config/flotilla/runs").expanduser()
 
@@ -45,7 +46,8 @@ def _component_data(component: str, r: Rendered, hdir: Path,
         pub = v["ssh"]["pubkey"]
         return {"pubkey": pub, "pubkey_match": " ".join(pub.split()[:2]),
                 "fingerprint": _fingerprint(pub),
-                "remove_pubkeys": v["ssh"].get("remove_pubkeys") or []}
+                "remove_pubkeys": v["ssh"].get("remove_pubkeys") or [],
+                "remove_keyfiles": v["ssh"].get("remove_keyfiles") or []}
     if component == "github":
         tok = hdir / "gh-token"
         tok.write_text(v["github"]["token"])
@@ -218,6 +220,9 @@ def execute(component: str, fleet: Fleet, hosts: list[Host], dry: bool,
     The last two items are ``("plan", {host: [ops]})`` (dry runs only)
     and ``("exit", code)``; every other item is a log line string.
     """
+    if component == "paseo":
+        yield from paseo.execute(fleet, hosts, dry)
+        return
     resolver = resolver or Resolver()
     lines: queue.Queue = queue.Queue()
     plans: dict[str, list[str]] = {}

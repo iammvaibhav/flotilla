@@ -14,7 +14,9 @@ You need:
 
 ## 1. Join the NetBird network
 
-The fleet talks over NetBird. Use a **setup key** so no browser login is needed.
+The fleet talks over NetBird. Skip this step if `netbird status` on the machine already shows `Signal: Connected`. Never run `netbird up` again on a connected machine.
+
+Use a **setup key** so no browser login is needed.
 
 - Long-lived machine: a one-off or reusable setup key.
 - Disposable machine that is rebuilt often: a **reusable, ephemeral** setup key. NetBird deletes an ephemeral peer that has been offline for 10 minutes, so the rebuilt machine can take the same name again.
@@ -68,6 +70,7 @@ flotilla plan ssh new-box        && flotilla apply ssh new-box
 flotilla plan toolchain new-box  && flotilla apply toolchain new-box
 flotilla plan github new-box     && flotilla apply github new-box
 flotilla plan omp new-box        && flotilla apply omp new-box
+flotilla plan paseo new-box      && flotilla apply paseo new-box
 ```
 
 | Component | What it does |
@@ -76,6 +79,7 @@ flotilla plan omp new-box        && flotilla apply omp new-box
 | `toolchain` | uv and pnpm, with a 7-day release cooldown (`exclude-newer`, `minimumReleaseAge`). Optional Node through `pnpm runtime`. |
 | `github` | `gh` (newest release older than 7 days), `gh` login, git name and email for the host's group. |
 | `omp` | omp binary if missing, layered `config.yml` / `models.yml` / `account-routing.yml`, `agents/`, `rules/`, and the fleet `AGENTS.md`. |
+| `paseo` | Adds the machine to the Paseo deploy inventory as a target of the builder for its platform, then starts a target-only Paseo deploy. Paseo is never built on the new machine. |
 
 Then apply `ssh` to every host, so the other hosts learn the new machine's name and host key:
 
@@ -85,7 +89,7 @@ flotilla apply ssh
 
 ## 5. Paseo
 
-Paseo is built once per platform on a builder host and copied to the others. To add the machine, add it to the Paseo deploy inventory on the build host and run the Paseo deploy there. The Paseo repository documents the inventory format and the deploy command.
+The `paseo` component in step 4 covers it. Paseo is built once per platform on a builder host and copied to targets by the Paseo repository's deploy script; flotilla only adds the machine to that deploy's inventory and starts a target-only deploy. Follow the deploy log on the inventory host in `~/.paseo/deploy-logs/latest.log`.
 
 ## 6. Check
 

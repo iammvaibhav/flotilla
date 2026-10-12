@@ -3,7 +3,7 @@
 Manage a small fleet of machines on a NetBird network from one place: groups, layered config, SSH between every host, GitHub access, toolchains, and omp (coding agent) config. Changes are planned first (dry run with diffs) and then applied over SSH with [pyinfra](https://pyinfra.com). Nothing is installed on the managed machines.
 
 - **Hosts**: live status of every machine (versions, GitHub login, NetBird, disk, load), a click-to-run command drawer, and an SSH mesh check (every host to every other host and to GitHub).
-- **Components**: plan or apply `ssh`, `toolchain`, `github`, `omp`, `netbird` per host, group or fleet.
+- **Components**: plan or apply `ssh`, `toolchain`, `github`, `omp`, `netbird`, `paseo` per host, group or fleet.
 - **Config**: edit the layered state in the browser. Model names autocomplete from `omp models` (with their thinking levels); secrets go into the vault and only a reference is saved.
 - **Onboard**: add a machine to the inventory and run an omp agent that follows [docs/onboarding.md](docs/onboarding.md). You choose the model and effort.
 
@@ -44,11 +44,12 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 
 | Component | What it manages |
 |---|---|
-| `ssh` | Fleet key `~/.ssh/id_ed25519` (never overwrites a different key), `~/.ssh/config.d/flotilla.conf` with short names for every host, pinned host keys, and an `Include` at the top of `~/.ssh/config`. |
+| `ssh` | Fleet key `~/.ssh/id_ed25519` (never overwrites a different key), `~/.ssh/config.d/flotilla.conf` with short names for every host, pinned host keys, an `Include` at the top of `~/.ssh/config`, and removal of retired keys (`ssh.remove_keyfiles`, `ssh.remove_pubkeys`). |
 | `toolchain` | uv and pnpm with release cooldowns (`exclude-newer`, `minimumReleaseAge`), links in `~/.local/bin`, optional Node through `pnpm runtime`. |
 | `github` | `gh` (newest release older than 7 days), `gh` login from a vault token, git name and email per group. |
 | `omp` | omp binary if missing; layered `~/.omp/agent` files; `agents/` and `rules/` are owned (extra files are removed); a generated `AGENTS.md` that tells every agent which machines exist. |
 | `netbird` | Installs NetBird and joins with a setup key on machines that are not connected yet. Connected peers are not touched. |
+| `paseo` | Adds missing hosts to the Paseo deploy inventory (matched by address) as targets of the builder for their platform, then starts a target-only Paseo deploy. Existing entries are never edited. |
 
 Each pyinfra run happens per host, so the plan is exact for each machine.
 
