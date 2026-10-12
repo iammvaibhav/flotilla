@@ -3,11 +3,12 @@
 Paseo is built once per platform on builder hosts and shipped to targets by
 the Paseo repository's own deploy script. flotilla does not build or install
 Paseo. It only adds missing hosts to the Paseo inventory (a JSON file on the
-inventory host) and starts a target-only deploy for them.
+inventory host) and runs the deploy for those hosts only.
 
-Existing inventory entries are never edited: the Paseo deploy owns them.
-Hosts are matched by address, because the two inventories can use
-different names for the same machine.
+Hosts are matched by name, then by address (the two inventories can use
+different names for the same machine). Of an existing entry, flotilla only
+updates ``address`` and ``dns`` when the machine moved; the rest belongs to
+the Paseo deploy.
 """
 
 from __future__ import annotations
@@ -59,18 +60,37 @@ def entry_for(host: Host, inventory: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
+def find(host: Host, inventory: dict[str, Any]) -> dict[str, Any] | None:
+    for e in inventory["hosts"]:
+        if e["name"] == host.name:
+            return e
+    for e in inventory["hosts"]:
+        if e["address"] == host.address:
+            return e
+    return None
+
+
+def dns_of(host: Host) -> str | None:
+    return next((n for n in host.names if "." in n), None)
+
+
 def plan(fleet: Fleet, hosts: list[Host]) -> dict[str, list[str]]:
     cfg = settings(fleet)
     inventory = read_inventory(fleet, cfg)
-    known = {h["address"] for h in inventory["hosts"]}
     out: dict[str, list[str]] = {}
     for h in hosts:
         if not (host_vars(h).get("paseo") or {}).get("enabled", True):
             continue
-        if h.address not in known:
+        e = find(h, inventory)
+        if e is None:
             e = entry_for(h, inventory)
             out[h.name] = [f"add to Paseo inventory (build from "
-                           f"{e['buildFrom']})", "deploy Paseo target"]
+                           f"{e['buildFrom']})", "deploy Paseo to this host"]
+        elif e["address"] != h.address or (dns_of(h) and
+                                           e.get("dns") != dns_of(h)):
+            out[h.name] = [f"update Paseo inventory address "
+                           f"{e['address']} -> {h.address}",
+                           "deploy Paseo to this host"]
     return out
 
 
@@ -86,8 +106,18 @@ def execute(fleet: Fleet, hosts: list[Host], dry: bool) -> Iterator[Any]:
         yield ("exit", 0)
         return
     inventory = read_inventory(fleet, cfg)
-    new = [entry_for(fleet.host(n), inventory) for n in sorted(changes)]
-    inventory["hosts"].extend(new)
+    names = []
+    for n in sorted(changes):
+        host = fleet.host(n)
+        e = find(host, inventory)
+        if e is None:
+            e = entry_for(host, inventory)
+            inventory["hosts"].append(e)
+        else:
+            e["address"] = host.address
+            if dns_of(host):
+                e["dns"] = dns_of(host)
+        names.append(e["name"])
     inv_host = fleet.host(cfg["inventory_host"])
     path = cfg["inventory"].replace("~", "$HOME", 1)
     body = json.dumps(inventory, indent=2) + "\n"
@@ -99,13 +129,13 @@ def execute(fleet: Fleet, hosts: list[Host], dry: bool) -> Iterator[Any]:
         yield f"could not write the inventory: {out[-300:]}"
         yield ("exit", code)
         return
-    names = " ".join(e["name"] for e in new)
-    yield f"added {names}; starting the target-only Paseo deploy"
+    yield f"inventory updated for {', '.join(names)}; starting the Paseo deploy"
     repo = cfg["repo"].replace("~", "$HOME", 1)
+    # `--hosts` restarts only the named hosts; their builders only build.
     code, out = remote.run(
         fleet, inv_host,
-        f"cd {repo} && PASEO_TARGETS_ONLY=1 "
-        f"PASEO_TARGET_HOSTS={shlex.quote(names)} ./scripts/deploy.sh",
+        f"cd {repo} && ./scripts/deploy.sh --hosts "
+        f"{shlex.quote(','.join(names))}",
         timeout=120)
     for line in out.splitlines()[-20:]:
         yield line

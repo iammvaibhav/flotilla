@@ -53,8 +53,8 @@ def run(fleet: Fleet, host: Host, script: str,
 
 def _keyscan(address: str) -> list[str]:
     out = subprocess.run(
-        ["ssh-keyscan", "-T", "6", "-t", "ed25519,ecdsa,rsa", address],
-        capture_output=True, text=True, timeout=40)
+        ["ssh-keyscan", "-T", "20", "-t", "ed25519,ecdsa,rsa", address],
+        capture_output=True, text=True, timeout=90)
     return [ln for ln in out.stdout.splitlines()
             if ln and not ln.startswith("#")]
 

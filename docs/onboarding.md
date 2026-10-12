@@ -79,7 +79,7 @@ flotilla plan paseo new-box      && flotilla apply paseo new-box
 | `toolchain` | uv and pnpm, with a 7-day release cooldown (`exclude-newer`, `minimumReleaseAge`). Optional Node through `pnpm runtime`. |
 | `github` | `gh` (newest release older than 7 days), `gh` login, git name and email for the host's group. |
 | `omp` | omp binary if missing, layered `config.yml` / `models.yml` / `account-routing.yml`, `agents/`, `rules/`, and the fleet `AGENTS.md`. |
-| `paseo` | Adds the machine to the Paseo deploy inventory as a target of the builder for its platform, then starts a target-only Paseo deploy. Paseo is never built on the new machine. |
+| `paseo` | Adds the machine to the Paseo deploy inventory as a target of the builder for its platform (or updates its address if it moved), then runs the Paseo deploy for that host only (`--hosts`). Paseo is never built on the new machine. |
 
 Then apply `ssh` to every host, so the other hosts learn the new machine's name and host key:
 
@@ -89,7 +89,7 @@ flotilla apply ssh
 
 ## 5. Paseo
 
-The `paseo` component in step 4 covers it. Paseo is built once per platform on a builder host and copied to targets by the Paseo repository's deploy script; flotilla only adds the machine to that deploy's inventory and starts a target-only deploy. Follow the deploy log on the inventory host in `~/.paseo/deploy-logs/latest.log`.
+The `paseo` component in step 4 covers it. Paseo is built once per platform on a builder host and copied to targets by the Paseo repository's deploy script; flotilla only adds the machine to that deploy's inventory and runs the deploy for that host only. Follow the deploy log on the inventory host in `~/.paseo/deploy-logs/latest.log`.
 
 ## 6. Check
 

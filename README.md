@@ -49,7 +49,7 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 | `github` | `gh` (newest release older than 7 days), `gh` login from a vault token, git name and email per group. |
 | `omp` | omp binary if missing; layered `~/.omp/agent` files; `agents/` and `rules/` are owned (extra files are removed); a generated `AGENTS.md` that tells every agent which machines exist. |
 | `netbird` | Installs NetBird and joins with a setup key on machines that are not connected yet. Connected peers are not touched. |
-| `paseo` | Adds missing hosts to the Paseo deploy inventory (matched by address) as targets of the builder for their platform, then starts a target-only Paseo deploy. Existing entries are never edited. |
+| `paseo` | Adds missing hosts to the Paseo deploy inventory as targets of the builder for their platform (or updates the address of a host that moved), then runs the Paseo deploy for those hosts only (`--hosts`). |
 
 Each pyinfra run happens per host, so the plan is exact for each machine.
 
