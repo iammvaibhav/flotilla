@@ -10,7 +10,9 @@ from pyinfra import host
 from pyinfra.facts.server import Command
 from pyinfra.operations import files, server
 
-PATH = 'export PATH="$HOME/.local/bin:$PATH";'
+# pyinfra runs plain `sh -c`; add the user and Homebrew bin directories.
+PATH = ('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:'
+        '$PATH";')
 
 
 def bundle() -> dict[str, Any]:
