@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>flotilla · sign in</title>
+<style>
+  :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+  body { display: grid; place-items: center; min-height: 100vh; margin: 0; background: Canvas; }
+  form { display: grid; gap: .75rem; width: 18rem; padding: 2rem; border: 1px solid color-mix(in srgb, CanvasText 15%, transparent); border-radius: 12px; }
+  h1 { margin: 0; font-size: 1.25rem; } input, button { font: inherit; padding: .55rem .7rem; border-radius: 8px; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); }
+  button { cursor: pointer; background: #3b6cf6; color: white; border: 0; } .bad { color: #d33; font-size: .9rem; }
+</style>
+</head>
+<body>
+<form method="post" action="/login">
+  <h1>⛵ flotilla</h1>
+  <input type="password" name="password" placeholder="Password" autofocus required>
+  <button>Sign in</button>
+  <div class="bad" id="bad" hidden>Wrong password.</div>
+</form>
+<script>if (location.search.includes("bad")) document.getElementById("bad").hidden = false;</script>
+</body>
+</html>
