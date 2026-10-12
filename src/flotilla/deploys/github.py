@@ -34,7 +34,13 @@ if not fact("command -v gh"):
     else:
         sh("install gh", GH_INSTALL)
 
-if not fact("gh auth status --hostname github.com >/dev/null && echo ok"):
+logged_in = fact("gh auth status --hostname github.com >/dev/null && echo ok")
+if not logged_in and b["os"] == "darwin" and \
+        fact("gh config get -h github.com user"):
+    # The token is in the login keychain, which SSH sessions cannot read.
+    # Logging in again here would store a plaintext token instead.
+    logged_in = "keychain"
+if not logged_in:
     tok = f"{home}/.cache/flotilla-gh-token"
     files.directory(name="dir ~/.cache", path=f"{home}/.cache")
     files.put(name="gh token (temporary)", src=b["data"]["token_file"],

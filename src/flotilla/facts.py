@@ -25,7 +25,9 @@ echo "paseo_daemon=$(paseo daemon status 2>/dev/null | awk -F': ' '/^localDaemon
 echo "uv=$(v uv --version | awk '{print $2}')"
 echo "pnpm=$(v pnpm --version)"
 echo "node=$(v node --version)"
-echo "gh=$(gh auth status >/dev/null 2>&1 && echo ok || echo no)"
+# macOS keeps the gh token in the login keychain, which SSH sessions
+# cannot open; a configured user there means "logged in (keychain)".
+echo "gh=$(gh auth status >/dev/null 2>&1 && echo ok || { [ "$(uname)" = Darwin ] && gh config get -h github.com user >/dev/null 2>&1 && echo keychain; } || echo no)"
 echo "git_email=$(git config --global user.email)"
 echo "netbird=$( (netbird status 2>/dev/null || /usr/local/bin/netbird status 2>/dev/null) | awk -F': ' '/^Management/{split($2,a,","); m=a[1]} /^Peers count/{p=$2} END{if (m) print "mgmt " m " · peers " p}')"
 """

@@ -86,7 +86,7 @@ async function loadStatus(fresh = false) {
     kv.innerHTML = !s.ok ? `<span>error</span><span>${esc(s.error)}</span>` : [
       ["omp", s.omp], ["paseo", `${s.paseo || "—"} ${s.paseo_daemon ? `(${s.paseo_daemon})` : ""}`],
       ["uv / pnpm", `${s.uv || "—"} / ${s.pnpm || "—"}`], ["node", s.node || "—"],
-      ["github", `${s.gh === "ok" ? "✓ logged in" : "✗"} · ${s.git_email || "no git email"}`],
+      ["github", `${s.gh === "ok" ? "✓ logged in" : s.gh === "keychain" ? "✓ keychain" : "✗"} · ${s.git_email || "no git email"}`],
       ["netbird", s.netbird || "—"], ["disk /", s.disk + (disk >= 90 ? " ⚠" : "")],
       ["load", s.load], ["up", s.uptime], ["ssh", `${s.ms} ms`],
     ].map(([k, v]) => `<span>${k}</span><span class="mono">${esc(v)}</span>`).join("");
