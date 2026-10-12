@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -53,33 +54,44 @@ class Resolver:
     def __init__(self) -> None:
         self._cache: dict[str, str] = {}
         self._synced: set[str] = set()
+        # Hosts render in parallel threads; one vault call at a time.
+        self._lock = threading.Lock()
 
     @property
     def values(self) -> dict[str, str]:
         """Resolved values, keyed by reference (used for redaction)."""
         return dict(self._cache)
 
+    def _vault(self, args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(["aside-vault", *args], capture_output=True,
+                              text=True, env=vault_env(), timeout=180)
+
     def get(self, ref: str) -> str:
-        if ref in self._cache:
-            return self._cache[ref]
         m = REF.match(ref)
         if not m:
             raise ValueError(f"not a secret reference: {ref}")
         account = m["account"]
-        cmd = ["aside-vault", "get", m["item"], "--account", account,
-               "--field", m["field"] or "password"]
-        if account in self._synced:
-            cmd.append("--no-sync")
-        out = subprocess.run(cmd, capture_output=True, text=True,
-                             env=vault_env(), timeout=120)
-        if out.returncode != 0:
-            raise RuntimeError(
-                f"aside-vault could not read {ref}: "
-                f"{out.stderr.strip()[-300:]}")
-        self._synced.add(account)
-        value = out.stdout.rstrip("\n")
-        self._cache[ref] = value
-        return value
+        with self._lock:
+            if ref in self._cache:
+                return self._cache[ref]
+            if account not in self._synced:
+                # `get` does not pull items that other machines added;
+                # an explicit sync per run does.
+                sync = self._vault(["sync", "--account", account])
+                if sync.returncode != 0:
+                    raise RuntimeError(f"aside-vault sync failed: "
+                                       f"{sync.stderr.strip()[-300:]}")
+                self._synced.add(account)
+            out = self._vault(["get", m["item"], "--account", account,
+                               "--field", m["field"] or "password",
+                               "--no-sync"])
+            if out.returncode != 0:
+                raise RuntimeError(
+                    f"aside-vault could not read {ref}: "
+                    f"{out.stderr.strip()[-300:]}")
+            value = out.stdout.rstrip("\n")
+            self._cache[ref] = value
+            return value
 
     def resolve(self, data: Any) -> Any:
         """Return a copy of ``data`` with every reference resolved."""
