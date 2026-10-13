@@ -60,10 +60,15 @@ os.replace(tmp, path)
 print("wrote " + path)
 '
 set -a; [ -f ~/.paseo/deploy.env ] && . ~/.paseo/deploy.env; set +a
-if command -v paseo >/dev/null && paseo daemon status >/dev/null 2>&1; then
-  paseo daemon reload --home ~/.paseo
+idle="no running Paseo daemon; it reads the config when it starts"
+command -v paseo >/dev/null || { echo "$idle"; exit 0; }
+# `paseo daemon status` exits 0 without a daemon; reload tells them apart.
+if out=$(paseo daemon reload --home ~/.paseo 2>&1); then
+  echo "$out"
+elif printf %s "$out" | grep -q "Daemon is not running"; then
+  echo "$idle"
 else
-  echo "no running Paseo daemon; it reads the config when it starts"
+  echo "$out"; exit 1
 fi
 """
 
