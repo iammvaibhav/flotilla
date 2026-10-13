@@ -39,13 +39,17 @@ def argv(fleet: Fleet, host: Host, script: str) -> list[str]:
             host.name, inner]
 
 
-def run(fleet: Fleet, host: Host, script: str,
-        timeout: int = 60) -> tuple[int, str]:
-    """Run ``script`` on ``host``; return (exit code, stdout+stderr)."""
+def run(fleet: Fleet, host: Host, script: str, timeout: int = 60,
+        input: str | None = None) -> tuple[int, str]:
+    """Run ``script`` on ``host``; return (exit code, stdout+stderr).
+
+    ``input`` goes to the script's stdin (keeps secrets out of argv).
+    """
     try:
         out = subprocess.run(argv(fleet, host, script), capture_output=True,
-                             text=True, timeout=timeout,
-                             stdin=subprocess.DEVNULL)
+                             text=True, timeout=timeout, input=input,
+                             stdin=None if input is not None
+                             else subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return 124, "timed out"
     return out.returncode, (out.stdout + out.stderr)

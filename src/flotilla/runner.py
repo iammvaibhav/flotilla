@@ -17,7 +17,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from . import paseo, remote
+from . import paseo, paseo_models, remote
 from .render import Rendered, expand, render
 from .secrets import Resolver
 from .state import Fleet, Host, state_dir
@@ -29,6 +29,7 @@ COMPONENTS = {
     "omp": "omp config layers, agents, rules, fleet AGENTS.md",
     "netbird": "NetBird client joined with a setup key (new machines)",
     "paseo": "Host is in the Paseo deploy inventory (build once, copy)",
+    "paseo-models": "Paseo agent providers and visible models (layered)",
 }
 RUNS = Path("~/.config/flotilla/runs").expanduser()
 
@@ -129,6 +130,8 @@ def file_diffs(component: str, fleet: Fleet, host: Host,
 
     Secret values are replaced by their references in the output.
     """
+    if component == "paseo-models":
+        return paseo_models.diffs(fleet, host, resolver)
     r = render(component, fleet, host, resolver)
     if not r.files:
         return []
@@ -222,6 +225,9 @@ def execute(component: str, fleet: Fleet, hosts: list[Host], dry: bool,
     """
     if component == "paseo":
         yield from paseo.execute(fleet, hosts, dry)
+        return
+    if component == "paseo-models":
+        yield from paseo_models.execute(fleet, hosts, dry, resolver)
         return
     resolver = resolver or Resolver()
     lines: queue.Queue = queue.Queue()

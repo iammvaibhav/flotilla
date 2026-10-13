@@ -20,7 +20,9 @@ lists them, then the host. Later layers win.
 from __future__ import annotations
 
 import copy
+import ipaddress
 import os
+import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,12 +58,21 @@ class Host:
 
     @property
     def all_names(self) -> list[str]:
-        """Alias, extra names and address, without duplicates."""
+        """Alias, extra names, address and IP, without duplicates."""
         out: list[str] = []
-        for n in [self.name, *self.names, self.address]:
+        for n in [self.name, *self.names, self.address, self.ip]:
             if n and n not in out:
                 out.append(n)
         return out
+
+    @property
+    def ip(self) -> str:
+        """The IPv4 address: ``address`` itself, or what it resolves to.
+
+        A machine whose NetBird IP changes when it is rebuilt keeps its
+        NetBird DNS name as ``address``; the controller resolves it.
+        """
+        return resolve_ipv4(self.address)
 
     def layers(self) -> list[str]:
         """Layer ids from lowest to highest priority."""
@@ -223,3 +234,18 @@ def dump_file(rel: str, content: Any) -> str:
         return content
     return yaml.dump(content, Dumper=_Dumper, sort_keys=False,
                      allow_unicode=True, width=4096)
+
+
+def resolve_ipv4(address: str) -> str:
+    """``address`` if it is an IP literal, else its first IPv4 address."""
+    try:
+        ipaddress.ip_address(address)
+        return address
+    except ValueError:
+        pass
+    try:
+        info = socket.getaddrinfo(address, None, socket.AF_INET,
+                                  socket.SOCK_STREAM)
+    except OSError as exc:
+        raise RuntimeError(f"cannot resolve {address}: {exc}") from exc
+    return str(info[0][4][0])

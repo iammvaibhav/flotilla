@@ -51,8 +51,8 @@ def entry_for(host: Host, inventory: dict[str, Any]) -> dict[str, Any]:
                 and h.get("platform") == host.platform]
     if not builders:
         raise RuntimeError(f"no Paseo builder for {host.platform}")
-    dns = next((n for n in host.names if "." in n), None)
-    entry = {"name": host.name, "ssh": host.name, "address": host.address,
+    dns = dns_of(host)
+    entry = {"name": host.name, "ssh": host.name, "address": host.ip,
              "platform": host.platform, "role": "target",
              "buildFrom": builders[0]["name"]}
     if dns:
@@ -65,13 +65,15 @@ def find(host: Host, inventory: dict[str, Any]) -> dict[str, Any] | None:
         if e["name"] == host.name:
             return e
     for e in inventory["hosts"]:
-        if e["address"] == host.address:
+        if e["address"] == host.ip:
             return e
     return None
 
 
 def dns_of(host: Host) -> str | None:
-    return next((n for n in host.names if "." in n), None)
+    """The host's DNS name: a dotted ``address``, else its first dotted name."""
+    return next((n for n in [host.address, *host.names]
+                 if "." in n and n != host.ip), None)
 
 
 def plan(fleet: Fleet, hosts: list[Host]) -> dict[str, list[str]]:
@@ -86,10 +88,10 @@ def plan(fleet: Fleet, hosts: list[Host]) -> dict[str, list[str]]:
             e = entry_for(h, inventory)
             out[h.name] = [f"add to Paseo inventory (build from "
                            f"{e['buildFrom']})", "deploy Paseo to this host"]
-        elif e["address"] != h.address or (dns_of(h) and
-                                           e.get("dns") != dns_of(h)):
+        elif e["address"] != h.ip or (dns_of(h) and
+                                      e.get("dns") != dns_of(h)):
             out[h.name] = [f"update Paseo inventory address "
-                           f"{e['address']} -> {h.address}",
+                           f"{e['address']} -> {h.ip}",
                            "deploy Paseo to this host"]
     return out
 
@@ -114,7 +116,7 @@ def execute(fleet: Fleet, hosts: list[Host], dry: bool) -> Iterator[Any]:
             e = entry_for(host, inventory)
             inventory["hosts"].append(e)
         else:
-            e["address"] = host.address
+            e["address"] = host.ip
             if dns_of(host):
                 e["dns"] = dns_of(host)
         names.append(e["name"])

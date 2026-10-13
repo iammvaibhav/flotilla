@@ -45,13 +45,23 @@ def _template(name: str) -> jinja2.Template:
         trim_blocks=True, lstrip_blocks=True).from_string(text)
 
 
-def ssh_config(fleet: Fleet) -> str:
-    """The ``~/.ssh/config.d/flotilla.conf`` include for every host."""
+def ssh_config(fleet: Fleet, ips: bool = False) -> str:
+    """The ``~/.ssh/config.d/flotilla.conf`` include for every host.
+
+    ``ips``: for a machine that cannot resolve NetBird DNS names. Hosts
+    whose address is a DNS name get their resolved IP, and a
+    ``HostKeyAlias`` so the pinned key (listed under the host's name) still
+    matches after the IP changes.
+    """
     lines = ["# Managed by flotilla. Changes here are overwritten.", ""]
     every: list[str] = []
     for h in fleet.hosts.values():
-        lines += [f"Host {' '.join(h.all_names)}",
-                  f"  HostName {h.address}", f"  User {h.user}", ""]
+        lines.append(f"Host {' '.join(h.all_names)}")
+        if ips and h.ip != h.address:
+            lines += [f"  HostName {h.ip}", f"  HostKeyAlias {h.name}"]
+        else:
+            lines.append(f"  HostName {h.address}")
+        lines += [f"  User {h.user}", ""]
         every += h.all_names
     lines += [
         f"Host {' '.join(every)} github.com",
@@ -87,7 +97,8 @@ def render(component: str, fleet: Fleet, host: Host,
             FileSpec("~/.ssh/id_ed25519", v["ssh"]["key"].rstrip("\n")
                      + "\n", "600", sensitive=True),
             FileSpec("~/.ssh/id_ed25519.pub", v["ssh"]["pubkey"] + "\n"),
-            FileSpec("~/.ssh/config.d/flotilla.conf", ssh_config(fleet)),
+            FileSpec("~/.ssh/config.d/flotilla.conf", ssh_config(
+                fleet, ips=not v["ssh"].get("netbird_dns", True))),
             FileSpec("~/.ssh/known_hosts.flotilla", known_hosts()),
         ]
     elif component == "omp":

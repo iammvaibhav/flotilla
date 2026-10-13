@@ -256,7 +256,7 @@ async def component_run(component: str, action: str, request: Request):
 
 @app.get("/api/components/{component}/diff")
 def component_diff(component: str, host: str) -> dict[str, Any]:
-    if component not in ("ssh", "omp"):
+    if component not in ("ssh", "omp", "paseo-models"):
         return {"diffs": [], "note": "this component has no managed files"}
     fleet = load_fleet()
     return {"diffs": runner.file_diffs(component, fleet, fleet.host(host),

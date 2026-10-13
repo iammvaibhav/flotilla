@@ -5,7 +5,7 @@ You run on **{{ me.name }}** ({{ me.platform }}, groups: {{ me.groups | join(", 
 | Name | Also | Address | User | Platform | Groups | Roles |
 |---|---|---|---|---|---|---|
 {% for h in hosts %}
-| {{ h.name }} | {{ h.names | join(", ") }} | {{ h.address }} | {{ h.user }} | {{ h.platform }} | {{ h.groups | join(", ") }} | {{ h.roles | join(", ") }} |
+| {{ h.name }} | {{ h.names | join(", ") }} | {{ h.ip }} | {{ h.user }} | {{ h.platform }} | {{ h.groups | join(", ") }} | {{ h.roles | join(", ") }} |
 {% endfor %}
 
 - flotilla (on the `flotilla-controller` host) manages this file, the omp config, SSH, GitHub and toolchains. Edits made here are overwritten; change them in flotilla.

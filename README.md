@@ -23,11 +23,15 @@ known_hosts                   pinned SSH host keys (flotilla scan-keys)
 templates/AGENTS.md.j2        optional override of the fleet AGENTS.md template
 ```
 
-Layers apply in order: `all`, the host's groups, the host. Later layers win.
+Layers apply in order: `all` (fleet defaults), the host's groups (for example `personal`, `work`), the host. The most specific layer wins, and every layer can add, override or remove:
 
 - YAML files that more than one layer supplies are deep-merged: maps merge, lists replace, `null` deletes a key, and a map with `$replace: true` replaces instead of merging.
 - A file that only one layer supplies is written exactly as it is in the state.
 - Other files are taken from the highest layer that has them.
+
+Settings that are really sets (for example the models Paseo shows) are kept as maps of `item: true` in the vars, so a group or host can add one item (`item: true`) or remove one inherited from a lower layer (`item: null`) without repeating the whole list.
+
+A host's `address` is its NetBird IP, or its NetBird DNS name for a machine whose IP changes when it is rebuilt (for example `grok-bot.netbird.cloud`). The controller resolves a DNS name when it needs the IP (Paseo inventory, the fleet `AGENTS.md`). A host that cannot resolve NetBird names sets `ssh.netbird_dns: false` in its vars; its SSH config then gets IPs plus a `HostKeyAlias`.
 
 ### Secrets
 
@@ -50,6 +54,7 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 | `omp` | omp binary if missing; layered `~/.omp/agent` files; `agents/` and `rules/` are owned (extra files are removed); a generated `AGENTS.md` that tells every agent which machines exist. |
 | `netbird` | Installs NetBird and joins with a setup key on machines that are not connected yet. Connected peers are not touched. |
 | `paseo` | Adds missing hosts to the Paseo deploy inventory as targets of the builder for their platform (or updates the address of a host that moved), then runs the Paseo deploy for those hosts only (`--hosts`). |
+| `paseo-models` | The Paseo daemon's agent providers (`agents.providers`) and the models its UI offers (`daemon.visibleModels`) in `~/.paseo/config.json`, from the layered `paseo_models` vars (`providers` map, `visible` map of `"provider:model": true`). Other keys in that file are left alone. The daemon reloads the config after a change. Hosts without `paseo_models` are not managed. |
 
 Each pyinfra run happens per host, so the plan is exact for each machine.
 
@@ -65,7 +70,7 @@ uv run flotilla exec 'uptime' work     # run a command on a group
 uv run flotilla serve --host <netbird-ip> --port 8790
 ```
 
-The web UI asks for a password. It reads `FLOTILLA_PASSWORD`, or creates `~/.config/flotilla/password` on first start.
+The web UI asks for a password. It reads `FLOTILLA_PASSWORD`, or creates `~/.config/flotilla/password` on first start. On the fleet the controller serves it at `https://flotilla.thevm.space`: a public DNS-only record pointing at the controller's NetBird IP, and Caddy on the controller (DNS-01 certificate) that accepts NetBird source addresses only and proxies to the NetBird-bound server.
 
 Other settings:
 
