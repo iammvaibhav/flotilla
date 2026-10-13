@@ -7,8 +7,15 @@ inventory host) and runs the deploy for those hosts only.
 
 Hosts are matched by name, then by address (the two inventories can use
 different names for the same machine). Of an existing entry, flotilla only
-updates ``address`` and ``dns`` when the machine moved; the rest belongs to
-the Paseo deploy.
+updates ``address`` and ``dns`` when the machine moved, and ``services``
+as the layered ``paseo.services`` vars ask; the rest belongs to the Paseo
+deploy. ``paseo.services`` is a map: ``true`` adds a service, ``false``
+removes it, a service the vars do not mention is left as it is::
+
+    paseo:
+      services:
+        omp: true            # omp update, plugins and account routing
+        stall-cron: false    # needs cron or systemd
 """
 
 from __future__ import annotations
@@ -60,6 +67,29 @@ def entry_for(host: Host, inventory: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
+def with_services(host: Host, entry: dict[str, Any]) -> dict[str, Any]:
+    """``entry`` with its services adjusted by the host's ``paseo.services``."""
+    spec = (host_vars(host).get("paseo") or {}).get("services") or {}
+    have = entry.get("services") or []
+    want = [s for s in have if spec.get(s) is not False]
+    want += [s for s, on in spec.items() if on and s not in want]
+    if want == have:
+        return entry
+    return {**entry, "services": want}
+
+
+def desired(host: Host, inventory: dict[str, Any]
+            ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """(current entry or None, entry flotilla wants) for ``host``."""
+    e = find(host, inventory)
+    if e is None:
+        return None, with_services(host, entry_for(host, inventory))
+    new = {**e, "address": host.ip}
+    if dns_of(host):
+        new["dns"] = dns_of(host)
+    return e, with_services(host, new)
+
+
 def find(host: Host, inventory: dict[str, Any]) -> dict[str, Any] | None:
     for e in inventory["hosts"]:
         if e["name"] == host.name:
@@ -83,16 +113,19 @@ def plan(fleet: Fleet, hosts: list[Host]) -> dict[str, list[str]]:
     for h in hosts:
         if not (host_vars(h).get("paseo") or {}).get("enabled", True):
             continue
-        e = find(h, inventory)
+        e, want = desired(h, inventory)
         if e is None:
-            e = entry_for(h, inventory)
             out[h.name] = [f"add to Paseo inventory (build from "
-                           f"{e['buildFrom']})", "deploy Paseo to this host"]
-        elif e["address"] != h.ip or (dns_of(h) and
-                                      e.get("dns") != dns_of(h)):
-            out[h.name] = [f"update Paseo inventory address "
-                           f"{e['address']} -> {h.ip}",
-                           "deploy Paseo to this host"]
+                           f"{want['buildFrom']})", "deploy Paseo to this host"]
+            continue
+        ops = []
+        if e["address"] != want["address"] or e.get("dns") != want.get("dns"):
+            ops.append(f"update Paseo inventory address "
+                       f"{e['address']} -> {want['address']}")
+        if e.get("services") != want.get("services"):
+            ops.append(f"set Paseo services {want.get('services') or []}")
+        if ops:
+            out[h.name] = ops + ["deploy Paseo to this host"]
     return out
 
 
@@ -110,16 +143,12 @@ def execute(fleet: Fleet, hosts: list[Host], dry: bool) -> Iterator[Any]:
     inventory = read_inventory(fleet, cfg)
     names = []
     for n in sorted(changes):
-        host = fleet.host(n)
-        e = find(host, inventory)
+        e, want = desired(fleet.host(n), inventory)
         if e is None:
-            e = entry_for(host, inventory)
-            inventory["hosts"].append(e)
+            inventory["hosts"].append(want)
         else:
-            e["address"] = host.ip
-            if dns_of(host):
-                e["dns"] = dns_of(host)
-        names.append(e["name"])
+            inventory["hosts"][inventory["hosts"].index(e)] = want
+        names.append(want["name"])
     inv_host = fleet.host(cfg["inventory_host"])
     path = cfg["inventory"].replace("~", "$HOME", 1)
     body = json.dumps(inventory, indent=2) + "\n"

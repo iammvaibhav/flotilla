@@ -53,7 +53,7 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 | `github` | `gh` (newest release older than 7 days), `gh` login from a vault token, git name and email per group. |
 | `omp` | omp binary if missing; layered `~/.omp/agent` files; `agents/` and `rules/` are owned (extra files are removed); a generated `AGENTS.md` that tells every agent which machines exist. |
 | `netbird` | Installs NetBird and joins with a setup key on machines that are not connected yet. Connected peers are not touched. |
-| `paseo` | Adds missing hosts to the Paseo deploy inventory as targets of the builder for their platform (or updates the address of a host that moved), then runs the Paseo deploy for those hosts only (`--hosts`). |
+| `paseo` | Adds missing hosts to the Paseo deploy inventory as targets of the builder for their platform, updates the address of a host that moved and the host's `services` from the layered `paseo.services` map (`omp: true` adds, `false` removes, unlisted services are left alone), then runs the Paseo deploy for those hosts only (`--hosts`). |
 | `paseo-models` | The Paseo daemon's agent providers (`agents.providers`) and the models its UI offers (`daemon.visibleModels`) in `~/.paseo/config.json`, from the layered `paseo_models` vars (`providers` map, `visible` map of `"provider:model": true`). Other keys in that file are left alone. The daemon reloads the config after a change. Hosts without `paseo_models` are not managed. |
 
 Each pyinfra run happens per host, so the plan is exact for each machine.
