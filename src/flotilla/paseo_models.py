@@ -5,6 +5,9 @@ set ``paseo_models``; the daemon and the Paseo deploy own the rest::
 
     agents.providers      <- paseo_models.providers
     daemon.visibleModels  <- paseo_models.visible (keys whose value is true)
+    <key>                 <- paseo_models.config.<key> (whole top-level keys,
+                             e.g. memory: {url: ...}; per-host daemon config
+                             that used to be replicated from the commander)
 
 Both come from the layered vars (``all`` -> groups -> host), so a group
 shares one set and a host can add or remove single entries:
@@ -50,6 +53,8 @@ except FileNotFoundError:
     config = {}
 config.setdefault("agents", {})["providers"] = want["providers"]
 config.setdefault("daemon", {})["visibleModels"] = want["visibleModels"]
+for key, value in want.get("config", {}).items():
+    config[key] = value
 os.makedirs(os.path.dirname(path), exist_ok=True)
 tmp = path + ".flotilla-tmp"
 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -81,10 +86,13 @@ def desired(host: Host, resolver: Resolver) -> dict[str, Any] | None:
     spec = resolver.resolve(spec)
     visible = spec.get("visible") or {}
     return {"providers": spec.get("providers") or {},
-            "visibleModels": [m for m, on in visible.items() if on]}
+            "visibleModels": [m for m, on in visible.items() if on],
+            "config": {k: v for k, v in (spec.get("config") or {}).items()
+                       if v is not None}}
 
 
-def current(fleet: Fleet, host: Host) -> dict[str, Any]:
+def current(fleet: Fleet, host: Host,
+            config_keys: list[str] | None = None) -> dict[str, Any]:
     """The managed keys as they are on the host (empty if no config)."""
     code, out = remote.run(
         fleet, host, f"cat {CONFIG.replace('~', '$HOME', 1)} 2>/dev/null"
@@ -95,7 +103,8 @@ def current(fleet: Fleet, host: Host) -> dict[str, Any]:
     config = json.loads(out[start:])
     return {"providers": (config.get("agents") or {}).get("providers") or {},
             "visibleModels": (config.get("daemon") or {}).get(
-                "visibleModels") or []}
+                "visibleModels") or [],
+            "config": {k: config.get(k) for k in config_keys or []}}
 
 
 def changes(have: dict[str, Any], want: dict[str, Any]) -> list[str]:
@@ -114,12 +123,16 @@ def changes(have: dict[str, Any], want: dict[str, Any]) -> list[str]:
     out += [f"hide model {m}" for m in old_m if m not in new_m]
     if not out and old_m != new_m:
         out.append("reorder visible models")
+    for key, value in want.get("config", {}).items():
+        if have.get("config", {}).get(key) != value:
+            out.append(f"set {key}")
     return out
 
 
 def _text(keys: dict[str, Any]) -> list[str]:
     return json.dumps({"agents.providers": keys["providers"],
-                       "daemon.visibleModels": keys["visibleModels"]},
+                       "daemon.visibleModels": keys["visibleModels"],
+                       **keys.get("config", {})},
                       indent=2, sort_keys=True).splitlines(True)
 
 
@@ -131,10 +144,11 @@ def diffs(fleet: Fleet, host: Host,
     want = desired(host, resolver)
     if want is None:
         return []
-    have = current(fleet, host)
+    have = current(fleet, host, list(want["config"]))
     if not changes(have, want):
         return []
-    label = f"{CONFIG} (agents.providers, daemon.visibleModels)"
+    keys = ", ".join(["agents.providers", "daemon.visibleModels", *want["config"]])
+    label = f"{CONFIG} ({keys})"
     text = "".join(difflib.unified_diff(
         _text(have), _text(want), fromfile=f"{host.name}:{label}",
         tofile=f"desired:{label}"))
@@ -155,7 +169,7 @@ def execute(fleet: Fleet, hosts: list[Host], dry: bool,
     def read(item):
         host, want = item
         try:
-            return host, want, current(fleet, host), None
+            return host, want, current(fleet, host, list(want["config"])), None
         except Exception as exc:  # noqa: BLE001 - reported per host
             return host, want, None, str(exc)
 
