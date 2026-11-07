@@ -33,7 +33,7 @@ from .state import Host, commit, load_fleet, state_dir
 
 HOME = Path("~/.config/flotilla").expanduser()
 COOKIE = "flotilla"
-REPLAN_SECONDS = 30 * 60
+REPLAN_SECONDS = 30 * 60      # also on every change to the state
 
 app = FastAPI(title="flotilla", docs_url=None, redoc_url=None)
 jobs = Jobs()
@@ -295,14 +295,25 @@ class Planner:
             return
         self._started = True
 
+        def head() -> str:
+            out = subprocess.run(["git", "-C", str(state_dir()), "rev-parse",
+                                  "HEAD"], capture_output=True, text=True)
+            return out.stdout.strip()
+
         def loop() -> None:
             while True:
                 self._wake.clear()
+                seen, started = head(), time.time()
                 try:
                     self.run_once()
                 except Exception:  # noqa: BLE001 - try again later
                     pass
-                self._wake.wait(REPLAN_SECONDS)
+                # Wake on a UI change, a commit made elsewhere (CLI, an
+                # agent), or after REPLAN_SECONDS.
+                while not self._wake.wait(60):
+                    if head() != seen or \
+                            time.time() - started > REPLAN_SECONDS:
+                        break
                 time.sleep(2)   # let a burst of saves settle
 
         threading.Thread(target=loop, daemon=True).start()

@@ -318,7 +318,8 @@ function itemMenu(e, item, host) {
   const marks = C.b.marks[item] || {};
   const opts = [[`Skip on ${host}`, `host:${host}`, "skip"], [`Delete on ${host}`, `host:${host}`, "delete"],
     ...h.groups.map((g) => [`Skip for group ${g}`, `group:${g}`, "skip"])];
-  for (const [lid, kind] of Object.entries(marks)) opts.push([`Undo ${kind} in ${lid}`, lid, null]);
+  const mine = ["base", ...h.groups.map((g) => `group:${g}`), `host:${host}`];
+  for (const [lid, kind] of Object.entries(marks)) if (mine.includes(lid)) opts.push([`Undo ${kind} in ${lid}`, lid, null]);
   const m = document.createElement("div");
   m.className = "menu";
   m.innerHTML = `<div class="h">${esc(item)} on ${esc(host)}</div>` + opts.map(([label], i) => `<div data-o="${i}">${esc(label)}</div>`).join("");
