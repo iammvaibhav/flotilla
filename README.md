@@ -85,7 +85,7 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 | Component | What it manages |
 |---|---|
 | `ssh` | Fleet key `~/.ssh/id_ed25519` (never overwrites a different key), `~/.ssh/config.d/flotilla.conf` with short names for every host, pinned host keys, an `Include` at the top of `~/.ssh/config`, and removal of retired keys (`ssh.remove_keyfiles`, `ssh.remove_pubkeys`). |
-| `toolchain` | uv and pnpm with release cooldowns (`exclude-newer`, `minimumReleaseAge`), links in `~/.local/bin`, Node through `pnpm runtime` on hosts with no node (nvm hosts keep theirs), and the pinned agent-browser native binary in `~/.local/bin`. |
+| `toolchain` | uv and pnpm with release cooldowns (`exclude-newer`, `minimumReleaseAge`), links in `~/.local/bin`, Node through `pnpm runtime` on hosts with no node (nvm hosts keep theirs), the pinned agent-browser native binary and Obscura stealth build (`obscura`, `obscura-worker`) in `~/.local/bin`, and ffmpeg where missing (apt with passwordless sudo, or Homebrew) for agent-browser's `record`. |
 | `docker` | Docker Engine (get.docker.com, passwordless sudo) and the user in the `docker` group, on Linux hosts with `docker.enabled`. |
 | `browser` | Shared browser on hosts with `browser.enabled`: `lscr.io/linuxserver/chromium` (Chrome + Selkies live view) and a CDP proxy in `~/shared-chrome`, bound to the host's NetBird IP, no login or token. Leaves the profile in `~/shared-chrome/config` alone. A config change recreates the container, which restarts Chrome. The `*.chrome.thevm.space` names and index page are prod's Caddy, not flotilla. |
 | `github` | `gh` (newest release older than 7 days), `gh` login from a vault token, git name and email per group. |
