@@ -10,7 +10,7 @@ Agents use it through the CLI and the `flotilla` skill (in the `skills` bundle, 
 
 ## How it works
 
-The desired state lives in a **private state directory** (default `~/.config/flotilla/state`, override with `FLOTILLA_STATE`). It is not part of this repository and is versioned in its own local git repo; every change through the web UI or the CLI is a commit.
+The desired state lives in a **private state directory** (default `~/.config/flotilla/state`, override with `FLOTILLA_STATE`). It is not part of this repository and is versioned in its own git repo; every change through the web UI or the CLI is a commit. If that repo has an `origin` remote (on the fleet: the private `iammvaibhav/flotilla-state`), each commit is also pushed, in the background.
 
 ```
 hosts.yaml                  machines: address, user, platform, groups

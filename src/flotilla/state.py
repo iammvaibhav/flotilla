@@ -121,7 +121,12 @@ def load_fleet(root: Path | None = None) -> Fleet:
 
 
 def commit(message: str, root: Path | None = None) -> bool:
-    """Commit every change in the state directory; False if none."""
+    """Commit every change in the state directory; False if none.
+
+    With an ``origin`` remote, the commit is also pushed, in the background
+    so a slow or offline GitHub never blocks a save. Commits made by hand
+    (``git commit``) go out with the next push.
+    """
     root = root or state_dir()
     git = ["git", "-C", str(root)]
     if not (root / ".git").exists():
@@ -134,6 +139,11 @@ def commit(message: str, root: Path | None = None) -> bool:
                           "-c", "user.email=flotilla@localhost",
                           "commit", "-q", "-m", message], check=True,
                    capture_output=True)
+    remotes = subprocess.run(git + ["remote"], capture_output=True, text=True)
+    if "origin" in remotes.stdout.split():
+        subprocess.Popen(git + ["push", "-q", "origin", "HEAD"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
     return True
 
 
