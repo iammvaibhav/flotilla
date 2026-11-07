@@ -558,3 +558,4 @@ await loadFleet();
 renderMatrix();
 loadStatus();
 showTab((location.hash || "#hosts").slice(1));
+window.addEventListener("hashchange", () => showTab((location.hash || "#hosts").slice(1)));
