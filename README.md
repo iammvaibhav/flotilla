@@ -1,41 +1,77 @@
 # flotilla
 
-Manage a small fleet of machines on a NetBird network from one place: groups, layered config, SSH between every host, GitHub access, toolchains, and omp (coding agent) config. Changes are planned first (dry run with diffs) and then applied over SSH with [pyinfra](https://pyinfra.com). Nothing is installed on the managed machines.
+Manage a small fleet of machines on a NetBird network from one place: SSH between every host, GitHub access, toolchains, and config files (omp config, skills, Paseo settings) kept as a base plus small per-group and per-host overrides. Changes are planned first (dry run with diffs) and then applied over SSH. Nothing is installed on the managed machines.
 
-- **Hosts**: live status of every machine (versions, GitHub login, NetBird, disk, load), a click-to-run command drawer, and an SSH mesh check (every host to every other host and to GitHub).
-- **Components**: plan or apply `ssh`, `toolchain`, `github`, `omp`, `netbird`, `paseo` per host, group or fleet.
-- **Config**: edit the layered state in the browser. Model names autocomplete from `omp models` (with their thinking levels); secrets go into the vault and only a reference is saved.
-- **Onboard**: add a machine to the inventory and run an omp agent that follows [docs/onboarding.md](docs/onboarding.md). You choose the model and effort.
+- **Hosts**: live status of every machine (versions, GitHub login, NetBird, disk, load) and a click-to-run command drawer.
+- **Config**: every bundle of config files. For each file: which layers have it, what each host ends up with and which layer set each key, the diff against a host, and an editor per layer. Override one key for a group or host without opening a file; skip or delete a skill per host or group. Plan and apply from the same page.
+- **Components**: plan or apply the installers per host or group: `ssh`, `github`, `toolchain`, `omp-binary`, `netbird`, `paseo-deploy`.
+
+Agents use it through the CLI and the `flotilla` skill (in the `skills` bundle, so every host has it).
 
 ## How it works
 
-The desired state lives in a **private state directory** (default `~/.config/flotilla/state`, override with `FLOTILLA_STATE`). It is not part of this repository and is versioned in its own local git repo; every save in the web UI is a commit.
+The desired state lives in a **private state directory** (default `~/.config/flotilla/state`, override with `FLOTILLA_STATE`). It is not part of this repository and is versioned in its own local git repo; every change through the web UI or the CLI is a commit.
 
 ```
-hosts.yaml                    controller + hosts (address, user, platform, groups)
-vars/all.yaml                 vars for every host
-vars/groups/<group>.yaml      vars for one group
-vars/hosts/<host>.yaml        vars for one host
-files/omp/all/...             omp files for every host
-files/omp/groups/<group>/...  omp files for one group
-files/omp/hosts/<host>/...    omp files for one host
-known_hosts                   pinned SSH host keys (flotilla scan-keys)
-templates/AGENTS.md.j2        optional override of the fleet AGENTS.md template
+hosts.yaml                  machines: address, user, platform, groups
+bundles/<name>/             files placed on hosts
+  bundle.yaml               destination and merge rules
+  README.md                 notes for people and agents (not copied)
+  base/...                  files for every host
+  groups/<group>/...        only what differs for one group
+  hosts/<host>/...          only what differs for one host
+settings/                   Flotilla's own settings, same layers (not copied)
+known_hosts                 pinned SSH host keys (flotilla scan-keys)
 ```
 
-Layers apply in order: `all` (fleet defaults), the host's groups (for example `personal`, `work`), the host. The most specific layer wins, and every layer can add, override or remove:
+Layers apply in order: `base`, the host's groups (in the order the host lists them), the host. The most specific layer wins.
 
-- YAML files that more than one layer supplies are deep-merged: maps merge, lists replace, `null` deletes a key, and a map with `$replace: true` replaces instead of merging.
-- A file that only one layer supplies is written exactly as it is in the state.
-- Other files are taken from the highest layer that has them.
+- YAML and JSON files (`merge: keys` in `bundle.yaml`) merge key by key. An override file holds only what differs:
 
-Settings that are really sets (for example the models Paseo shows) are kept as maps of `item: true` in the vars, so a group or host can add one item (`item: true`) or remove one inherited from a lower layer (`item: null`) without repeating the whole list.
+  ```yaml
+  modelRoles.default: anthropic/claude-opus-5-5:high   # one key, any depth
+  disabledProviders+: [grok-build]                     # add to a list
+  disabledProviders-: [ollama]                         # remove from a list
+  retry.fallbackChains!: {default: [cursor/x]}         # replace, no merge
+  auth.broker: ~                                       # delete the key
+  ```
 
-A host's `address` is its NetBird IP, or its NetBird DNS name for a machine whose IP changes when it is rebuilt (for example `grok-bot.netbird.cloud`). The controller resolves a DNS name when it needs the IP (Paseo inventory, the fleet `AGENTS.md`). A host that cannot resolve NetBird names sets `ssh.netbird_dns: false` in its vars; its SSH config then gets IPs plus a `HostKeyAlias`.
+  Dots split a key into a path only at the top level of an override file, so a nested key with a dot in it stays literal. `+`, `-` and `!` work at any depth.
+- Other files are replaced whole by the most specific layer that has them.
+- A file that only one layer has is written exactly as it is (comments kept).
+- `name.j2` is a Jinja template rendered per host into `name` (`me` is the host, `hosts` the managed hosts). `name.json.yml` is YAML, with comments, written as `name.json`.
+- `_layer.yml` in a layer: `skip: [item]` does not place an item there and leaves it alone on the host; `delete: [item]` removes it from those hosts.
+
+`bundle.yaml`:
+
+```yaml
+description: omp settings, models, agents, rules and the fleet AGENTS.md
+dest: ~/.omp/agent          # directory on every host
+unit: file                  # or directory: one folder = one item (skills)
+files:                      # first match wins; the default is whole
+  - {match: "*.yml", merge: keys}
+  - {match: config.json, merge: keys, own_keys: [agents.providers]}
+owned: [agents, rules]      # files there that the bundle lacks are deleted
+after_apply: paseo daemon reload --home ~/.paseo   # on hosts that changed
+```
+
+`own_keys` makes Flotilla set only those keys of a host file that another program also writes (Paseo's `config.json`). To manage a new set of files, add a folder with a `bundle.yaml`; no code change.
+
+Bundles today: `omp` (`~/.omp/agent`: settings, models, account routing, agents, rules, and the fleet `AGENTS.md`), `skills` (`~/.agents/skills`), `paseo` (agent providers, visible models and memory in `~/.paseo/config.json`).
+
+### Sync
+
+Flotilla compiles each bundle per host on the controller, reads the host's files over SSH, and lists what would change (plan). Apply writes only those files, atomically, then runs `after_apply`. Nothing changes on a host until someone applies. After every change in the UI, and every 30 minutes, the web app re-plans every bundle in the background, so the Config page shows which hosts are out of date and which are offline.
+
+### Hosts
+
+A host's `address` is its NetBird IP, or its NetBird DNS name for a machine whose IP changes when it is rebuilt; the controller resolves the name when it needs the IP. A host that cannot resolve NetBird names sets `ssh.netbird_dns: false` in its settings; its SSH config then gets IPs plus a `HostKeyAlias`.
+
+`managed: false` marks a machine Flotilla does not manage: it keeps an SSH name and a pinned key on the other hosts, and no component or bundle ever runs there.
 
 ### Secrets
 
-State files never hold secret values. They hold references that the `aside-vault` CLI (a command-line client for the Aside password vault) resolves on the controller when it renders files:
+State files never hold secret values. They hold references that the `aside-vault` CLI resolves on the controller when it renders files:
 
 ```yaml
 apiKey: aside://you@example.com/<item-id>            # password field
@@ -51,22 +87,25 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 | `ssh` | Fleet key `~/.ssh/id_ed25519` (never overwrites a different key), `~/.ssh/config.d/flotilla.conf` with short names for every host, pinned host keys, an `Include` at the top of `~/.ssh/config`, and removal of retired keys (`ssh.remove_keyfiles`, `ssh.remove_pubkeys`). |
 | `toolchain` | uv and pnpm with release cooldowns (`exclude-newer`, `minimumReleaseAge`), links in `~/.local/bin`, optional Node through `pnpm runtime`. |
 | `github` | `gh` (newest release older than 7 days), `gh` login from a vault token, git name and email per group. |
-| `omp` | omp binary if missing; layered `~/.omp/agent` files; `agents/` and `rules/` are owned (extra files are removed); a generated `AGENTS.md` that tells every agent which machines exist. |
+| `omp-binary` | omp installed if missing; old npm-global copies removed (`omp.remove_npm_global`). |
 | `netbird` | Installs NetBird and joins with a setup key on machines that are not connected yet. Connected peers are not touched. |
-| `paseo` | Adds missing hosts to the Paseo deploy inventory as targets of the builder for their platform, updates the address of a host that moved and the host's `services` from the layered `paseo.services` map (`omp: true` adds, `false` removes, unlisted services are left alone), then runs the Paseo deploy for those hosts only (`--hosts`). |
-| `paseo-models` | The Paseo daemon's agent providers (`agents.providers`) and the models its UI offers (`daemon.visibleModels`) in `~/.paseo/config.json`, from the layered `paseo_models` vars (`providers` map, `visible` map of `"provider:model": true`). Other keys in that file are left alone. The daemon reloads the config after a change. Hosts without `paseo_models` are not managed. |
+| `paseo-deploy` | Adds missing hosts to the Paseo deploy inventory as targets of the builder for their platform, updates the address of a host that moved and the host's `services` from the layered `paseo.services` setting (`omp: true` adds, `false` removes, unlisted services are left alone), then runs the Paseo deploy for those hosts only (`--hosts`). |
 
-Each pyinfra run happens per host, so the plan is exact for each machine.
+Components run with pyinfra, one process per host.
 
 ## Quick start
 
 ```bash
 uv sync
-uv run flotilla scan-keys              # pin host keys into the state
-uv run flotilla plan ssh               # dry run
-uv run flotilla apply ssh dev          # one host, or a group name
-uv run flotilla diff omp dev           # file diff, secrets masked
-uv run flotilla exec 'uptime' work     # run a command on a group
+uv run flotilla scan-keys                                  # pin host keys into the state
+uv run flotilla bundles                                    # list the bundles
+uv run flotilla show omp config.yml --host dev --explain   # what dev gets, and from which layer
+uv run flotilla override omp config.yml modelRoles.default anthropic/claude-opus-5-5:high --group work
+uv run flotilla skip skills use_gpu --host prod            # --delete, --clear
+uv run flotilla plan omp                                   # dry run (bundle or component)
+uv run flotilla diff omp dev                               # file diff, secrets masked
+uv run flotilla apply omp work                             # one host, or a group name
+uv run flotilla exec 'uptime' work                         # run a command on a group
 uv run flotilla serve --host <netbird-ip> --port 8790
 ```
 
@@ -76,6 +115,7 @@ Other settings:
 
 - `FLOTILLA_CONTROLLER`: host name that runs flotilla (default: `controller` in `hosts.yaml`). The controller manages itself locally.
 - `FLOTILLA_CATALOG_HOST`: host whose `omp models` catalog drives autocomplete (default: the controller).
+- `FLOTILLA_NO_PLANNER=1`: do not re-plan bundles in the background.
 
 ## Security notes
 

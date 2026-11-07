@@ -1,10 +1,9 @@
-"""Read-only host facts for the host map, plus the SSH mesh check."""
+"""Read-only host facts for the host map and the model catalog."""
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -51,38 +50,7 @@ def host_status(fleet: Fleet, host: Host) -> dict[str, Any]:
 def fleet_status(fleet: Fleet) -> list[dict[str, Any]]:
     with ThreadPoolExecutor(max_workers=8) as pool:
         return list(pool.map(lambda h: host_status(fleet, h),
-                             fleet.hosts.values()))
-
-
-def mesh(fleet: Fleet) -> dict[str, Any]:
-    """From every host, ``ssh <other> hostname`` by short name.
-
-    Returns ``{"hosts": [...], "cells": {src: {dst: "ok"|reason}}}``.
-    macOS cannot reach its own NetBird address, so self-checks are skipped.
-    """
-    names = list(fleet.hosts)
-    probe = "; ".join(
-        f"r=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=yes "
-        f"-o ConnectTimeout=6 {shlex.quote(n)} 'echo ok' 2>&1 | tail -1); "
-        f"echo {shlex.quote(n)}=$r" for n in names)
-    probe += ("; r=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=yes "
-              "-T git@github.com 2>&1 | head -1); "
-              "case $r in Hi*) echo github=ok;; *) echo github=$r;; esac")
-
-    def one(h: Host) -> tuple[str, dict[str, str]]:
-        code, out = remote.run(fleet, h, probe, timeout=120)
-        cells = {}
-        for line in out.splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
-                if k in names or k == "github":
-                    cells[k] = "ok" if v.strip() == "ok" else v.strip()[-80:]
-        cells.pop(h.name, None)
-        return h.name, cells
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        result = dict(pool.map(one, fleet.hosts.values()))
-    return {"hosts": names, "cells": result}
+                             fleet.managed()))
 
 
 def catalog_host(fleet: Fleet) -> Host:

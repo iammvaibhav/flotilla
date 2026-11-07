@@ -1,4 +1,11 @@
-"""FastAPI app: host map, quick exec, components, config editor, onboarding."""
+"""FastAPI app: host map, quick exec, components, and the Config page.
+
+Config page: Flotilla's settings and every bundle (base plus group and host
+overrides), the file each host ends up with and where each key comes from,
+diffs against the hosts, plan and apply. A background thread re-plans every
+bundle after each change and every 30 minutes, so the page can show which
+hosts are out of date.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +14,8 @@ import hmac
 import json
 import os
 import secrets as pysecrets
-import shlex
 import subprocess
-import sys
+import threading
 import time
 from importlib import resources
 from pathlib import Path
@@ -21,16 +27,13 @@ from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
 from itsdangerous import BadSignature, TimestampSigner
 
-from . import facts, remote, runner, secrets
+from . import bundles, facts, remote, runner, secrets
 from .jobs import Jobs
-from .state import Host, host_vars, load_fleet, save_fleet, state_dir
+from .state import Host, commit, load_fleet, state_dir
 
 HOME = Path("~/.config/flotilla").expanduser()
-REPO = Path(__file__).resolve().parents[2]
 COOKIE = "flotilla"
-DEFAULT_MODEL = "anthropic/claude-opus-5-5"
-DEFAULT_EFFORT = "high"
-EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]
+REPLAN_SECONDS = 30 * 60
 
 app = FastAPI(title="flotilla", docs_url=None, redoc_url=None)
 jobs = Jobs()
@@ -120,20 +123,27 @@ def _cached(key: str, ttl: float, fn):
 def _hosts(names: list[str] | None) -> list[Host]:
     fleet = load_fleet()
     if not names:
-        return list(fleet.hosts.values())
+        return fleet.managed()
     out = []
     for n in names:
-        if n in fleet.hosts:
+        if n in fleet.hosts and fleet.hosts[n].managed:
             out.append(fleet.hosts[n])
         else:
             out += [fleet.hosts[m] for m in fleet.groups().get(n, [])]
     if not out:
-        raise HTTPException(400, f"no hosts match {names}")
+        raise HTTPException(400, f"no managed hosts match {names}")
     return out
 
 
 def _job(job) -> dict[str, Any]:
     return {"job": job.id}
+
+
+def _bundle(name: str) -> bundles.Bundle:
+    try:
+        return bundles.get_bundle(name)
+    except bundles.BundleError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 # ---------------------------------------------------------------- hosts
@@ -145,9 +155,9 @@ def fleet_info() -> dict[str, Any]:
             "hosts": [{"name": h.name, "address": h.address, "user": h.user,
                        "platform": h.platform, "groups": h.groups,
                        "names": h.names, "roles": h.roles}
-                      for h in fleet.hosts.values()],
+                      for h in fleet.managed()],
             "components": runner.COMPONENTS,
-            "vault_accounts": (host_vars(fleet.host(fleet.controller))
+            "vault_accounts": (bundles.host_vars(fleet.host(fleet.controller))
                                .get("vault") or {}).get("accounts", [])}
 
 
@@ -187,19 +197,6 @@ async def exec_cmd(request: Request) -> dict[str, Any]:
 
     names = ", ".join(h.name for h in hosts)
     return _job(jobs.start(f"exec on {names}: {command[:60]}", work))
-
-
-@app.post("/api/mesh")
-def mesh() -> dict[str, Any]:
-    def work(emit):
-        emit("checking ssh from every host to every other host…")
-        result = facts.mesh(load_fleet())
-        bad = sum(v != "ok" for row in result["cells"].values()
-                  for v in row.values())
-        emit(f"{bad} failing link(s)")
-        yield ("result", result)
-        yield ("exit", 1 if bad else 0)
-    return _job(jobs.start("ssh mesh check", work))
 
 
 # ---------------------------------------------------------------- jobs
@@ -256,14 +253,223 @@ async def component_run(component: str, action: str, request: Request):
 
 @app.get("/api/components/{component}/diff")
 def component_diff(component: str, host: str) -> dict[str, Any]:
-    if component not in ("ssh", "omp", "paseo-models"):
+    if component != "ssh":
         return {"diffs": [], "note": "this component has no managed files"}
     fleet = load_fleet()
     return {"diffs": runner.file_diffs(component, fleet, fleet.host(host),
                                        secrets.Resolver())}
 
 
-# ---------------------------------------------------------------- config
+# ---------------------------------------------------------------- plans
+
+class Planner:
+    """Latest plan of every bundle, refreshed in the background."""
+
+    def __init__(self) -> None:
+        self.plans: dict[str, dict[str, Any]] = {}
+        self._wake = threading.Event()
+        self._started = False
+
+    def record(self, name: str, result: dict[str, Any]) -> None:
+        self.plans[name] = {"at": time.time(), **result}
+
+    def run_once(self) -> None:
+        fleet = load_fleet()
+        resolver = secrets.Resolver()
+        for name, b in bundles.load_bundles().items():
+            result: dict[str, Any] = {}
+            try:
+                for item in bundles.execute(b, fleet, fleet.managed(),
+                                            dry=True, resolver=resolver):
+                    if isinstance(item, tuple) and item[0] == "plan":
+                        result = item[1]
+            except Exception as exc:  # noqa: BLE001 - shown in the UI
+                result = {"plan": {}, "errors": {"*": str(exc)}}
+            self.record(name, result)
+
+    def soon(self) -> None:
+        self._wake.set()
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+
+        def loop() -> None:
+            while True:
+                self._wake.clear()
+                try:
+                    self.run_once()
+                except Exception:  # noqa: BLE001 - try again later
+                    pass
+                self._wake.wait(REPLAN_SECONDS)
+                time.sleep(2)   # let a burst of saves settle
+
+        threading.Thread(target=loop, daemon=True).start()
+
+
+planner = Planner()
+
+
+@app.on_event("startup")
+def _start_planner() -> None:
+    if os.environ.get("FLOTILLA_NO_PLANNER") != "1":
+        planner.start()
+
+
+# ---------------------------------------------------------------- bundles
+
+def _bundle_info(b: bundles.Bundle) -> dict[str, Any]:
+    return {"name": b.name, "description": b.description, "dest": b.dest,
+            "unit": b.unit, "deployable": b.deployable,
+            "owned": b.owned, "after_apply": b.after_apply,
+            "plan": planner.plans.get(b.name)}
+
+
+@app.get("/api/bundles")
+def bundle_list() -> list[dict[str, Any]]:
+    return [_bundle_info(b) for b in
+            [bundles.settings_bundle(), *bundles.load_bundles().values()]]
+
+
+@app.get("/api/bundles/{name}")
+def bundle_detail(name: str) -> dict[str, Any]:
+    """Layers, files and, per host, where each file or item comes from."""
+    b = _bundle(name)
+    fleet = load_fleet()
+    layer_ids = b.existing_layers()
+    state_files: dict[str, list[str]] = {}
+    skips: dict[str, dict[str, str]] = {}
+    for lid in layer_ids:
+        d = b.layer_dir(lid)
+        for rel in bundles.layer_files(d):
+            state_files.setdefault(rel, []).append(lid)
+        man = bundles.layer_manifest(d)
+        for kind in ("skip", "delete"):
+            for item in man[kind]:
+                skips.setdefault(item, {})[lid] = kind
+    hosts: dict[str, Any] = {}
+    for h in fleet.managed():
+        try:
+            comp = bundles.compile_bundle(b, h, fleet)
+        except (bundles.BundleError, ValueError) as exc:
+            hosts[h.name] = {"error": str(exc)}
+            continue
+        hosts[h.name] = {"items": comp.items, "skipped": comp.skipped,
+                         "delete": comp.delete,
+                         "files": {r: f.sources for r, f in comp.files.items()}}
+    files = [{"rel": rel, "out": bundles.out_name(rel), "layers": lids,
+              "merge": b.rule(bundles.out_name(rel)).merge}
+             for rel, lids in sorted(state_files.items())]
+    return {**_bundle_info(b), "layers": layer_ids, "files": files,
+            "marks": skips, "hosts": hosts,
+            "groups": fleet.groups(),
+            "host_names": [h.name for h in fleet.managed()],
+            "readme": (b.root / "README.md").read_text()
+            if (b.root / "README.md").is_file() else ""}
+
+
+@app.get("/api/bundles/{name}/compiled")
+def bundle_compiled(name: str, host: str, file: str) -> dict[str, Any]:
+    b = _bundle(name)
+    fleet = load_fleet()
+    comp = bundles.compile_bundle(b, fleet.host(host), fleet)
+    f = comp.files.get(file)
+    if f is None:
+        raise HTTPException(404, f"{host} gets no {file} from {name}")
+    text = (f.text if isinstance(f.text, str)
+            else f"(binary file, {len(f.text)} bytes)")
+    return {"file": file, "text": text, "sources": f.sources,
+            "explain": f.explain, "own_keys": f.own_keys, "secret": f.secret}
+
+
+@app.get("/api/bundles/{name}/diff")
+def bundle_diff(name: str, host: str) -> dict[str, Any]:
+    b = _bundle(name)
+    if not b.deployable:
+        return {"diffs": [], "note": "not copied to hosts"}
+    fleet = load_fleet()
+    return {"diffs": bundles.diffs(b, fleet, fleet.host(host),
+                                   secrets.Resolver())}
+
+
+def _saved(message: str) -> None:
+    commit(message)
+    planner.soon()
+
+
+@app.post("/api/bundles/{name}/override")
+async def bundle_override(name: str, request: Request) -> dict[str, Any]:
+    """Set (or clear) one key for a group or host."""
+    body = await request.json()
+    b = _bundle(name)
+    layer, rel, key = body["layer"], body["file"], body["key"]
+    try:
+        path = b.layer_dir(layer) / rel
+        if body.get("clear"):
+            def change():
+                if not bundles.clear_override(b, layer, rel, key):
+                    raise HTTPException(400, f"{key} is not set in {layer}")
+            message = f"{name}: clear {key} for {layer}"
+        else:
+            value = yaml.safe_load(body.get("value", ""))
+            if secrets.literal_secrets({key: value}):
+                raise HTTPException(422, "store the secret in the vault and "
+                                    "use its aside:// reference")
+            op = body.get("op", "")
+
+            def change():
+                bundles.set_override(b, layer, rel, key, value, op)
+            message = f"{name}: {key}{op} for {layer}"
+        problems = bundles.guarded_edit(b, load_fleet(), path, change)
+    except (bundles.BundleError, yaml.YAMLError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if problems:
+        return JSONResponse({"ok": False, "problems": problems},
+                            status_code=422)
+    _saved(message)
+    return {"ok": True}
+
+
+@app.post("/api/bundles/{name}/item")
+async def bundle_item(name: str, request: Request) -> dict[str, Any]:
+    """Skip, delete or place one item (for example a skill) in a layer."""
+    body = await request.json()
+    b = _bundle(name)
+    kind = body.get("state") or None
+    try:
+        bundles.set_item_state(b, body["layer"], body["item"], kind)
+    except bundles.BundleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _saved(f"{name}: {kind or 'place'} {body['item']} on {body['layer']}")
+    return {"ok": True}
+
+
+@app.post("/api/bundles/{name}/{action}")
+async def bundle_run(name: str, action: str, request: Request):
+    if action not in ("plan", "apply"):
+        raise HTTPException(404)
+    b = _bundle(name)
+    if not b.deployable:
+        raise HTTPException(400, f"{name} is not copied to hosts")
+    body = await request.json() if await request.body() else {}
+    hosts = _hosts(body.get("hosts"))
+    fleet = load_fleet()
+
+    def work(emit):
+        for item in bundles.execute(b, fleet, hosts, dry=action == "plan"):
+            if isinstance(item, tuple) and item[0] == "plan" and \
+                    len(hosts) == len(fleet.managed()):
+                planner.record(name, item[1])
+            yield item
+        if action == "apply":
+            planner.soon()
+
+    names = ", ".join(h.name for h in hosts)
+    return _job(jobs.start(f"{action} {name} on {names}", work))
+
+
+# ---------------------------------------------------------------- state files
 
 def _state_path(rel: str) -> Path:
     root = state_dir().resolve()
@@ -273,39 +479,37 @@ def _state_path(rel: str) -> Path:
     return path
 
 
-@app.get("/api/state/tree")
-def state_tree() -> list[str]:
-    root = state_dir()
-    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
-                  if p.is_file() and ".git" not in p.parts
-                  and "import" not in p.parts
-                  and p.name != "known_hosts")
+def _owner(rel: str) -> bundles.Bundle | None:
+    """The bundle (or settings) a state file belongs to."""
+    parts = rel.split("/")
+    if parts[0] == bundles.SETTINGS:
+        return bundles.settings_bundle()
+    if parts[0] == "bundles" and len(parts) > 2:
+        return bundles.get_bundle(parts[1])
+    return None
 
 
 @app.get("/api/state/file")
 def state_read(path: str) -> dict[str, Any]:
     p = _state_path(path)
     if not p.is_file():
-        raise HTTPException(404)
+        return {"path": path, "content": "", "new": True}
     return {"path": path, "content": p.read_text()}
 
 
 def _validate(path: str, content: str) -> list[str]:
-    """Problems that block a save, and warnings."""
+    """Problems that block a save."""
     problems = []
-    if path.endswith((".yml", ".yaml")):
+    if path.endswith((".yml", ".yaml", ".json")):
         try:
-            data = yaml.safe_load(content)
-        except yaml.YAMLError as exc:
-            return [f"YAML error: {exc}"]
+            data = (json.loads(content) if path.endswith(".json")
+                    else yaml.safe_load(content))
+        except (ValueError, yaml.YAMLError) as exc:
+            return [f"{'JSON' if path.endswith('.json') else 'YAML'} "
+                    f"error: {exc}"]
         for key, _ in secrets.literal_secrets(data):
             problems.append(f"literal secret at {key}: store it in the vault "
                             f"and paste the aside:// reference instead")
-    elif path.endswith(".json"):
-        try:
-            json.loads(content)
-        except ValueError as exc:
-            return [f"JSON error: {exc}"]
     return problems
 
 
@@ -333,13 +537,20 @@ async def state_write(request: Request) -> dict[str, Any]:
     body = await request.json()
     path, content = body["path"], body["content"]
     problems = _validate(path, content)
+    p = _state_path(path)
+    owner = _owner(path) if not problems else None
+    if owner is not None:
+        def change():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        problems = bundles.guarded_edit(owner, load_fleet(), p, change)
+    elif not problems:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
     if problems:
         return JSONResponse({"ok": False, "problems": problems},
                             status_code=422)
-    p = _state_path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
-    _commit(f"edit {path}")
+    _saved(f"edit {path}")
     return {"ok": True, "warnings": [
         f"unknown model: {m}" for m in _unknown_models(content)]}
 
@@ -349,22 +560,8 @@ def state_delete(path: str) -> dict[str, Any]:
     p = _state_path(path)
     if p.is_file():
         p.unlink()
-        _commit(f"delete {path}")
+        _saved(f"delete {path}")
     return {"ok": True}
-
-
-def _commit(message: str) -> None:
-    """Record every state change in a local git repo (history + undo)."""
-    root = state_dir()
-    git = ["git", "-C", str(root)]
-    if not (root / ".git").exists():
-        subprocess.run(git + ["init", "-q"], check=True)
-        (root / ".gitignore").write_text("import/\n")
-    subprocess.run(git + ["add", "-A"], check=True)
-    subprocess.run(git + ["-c", "user.name=flotilla",
-                          "-c", "user.email=flotilla@localhost",
-                          "commit", "-q", "-m", message],
-                   capture_output=True)
 
 
 @app.get("/api/state/history")
@@ -382,113 +579,8 @@ def catalog_models(fresh: bool = False) -> list[dict[str, Any]]:
     return _cached("models", 600, lambda: facts.models(load_fleet()))
 
 
-@app.get("/api/catalog/settings")
-def catalog_settings() -> list[dict[str, Any]]:
-    return _cached("settings", 3600, lambda: facts.settings(load_fleet()))
-
-
 @app.post("/api/secrets")
 async def store_secret(request: Request) -> dict[str, Any]:
     body = await request.json()
     ref = secrets.store(body["account"], body["title"], body["value"])
     return {"ref": ref}
-
-
-# ---------------------------------------------------------------- onboarding
-
-@app.get("/api/onboarding/guide")
-def guide() -> dict[str, str]:
-    return {"markdown": (REPO / "docs" / "onboarding.md").read_text()}
-
-
-@app.post("/api/onboarding/hosts")
-async def add_host(request: Request) -> dict[str, Any]:
-    """Add a host to ``hosts.yaml`` (it stays inert until components run)."""
-    b = await request.json()
-    fleet = load_fleet()
-    name = b["name"].strip()
-    if not name or name in fleet.hosts:
-        raise HTTPException(400, "name is empty or already used")
-    fleet.hosts[name] = Host(
-        name=name, address=b["address"].strip(), user=b["user"].strip(),
-        platform=b["platform"], groups=[g for g in b.get("groups", []) if g],
-        names=[n for n in b.get("names", []) if n])
-    save_fleet(fleet)
-    _commit(f"add host {name}")
-    return {"ok": True}
-
-
-AGENT_PROMPT = """You are onboarding the machine `{name}` into the fleet.
-
-Follow docs/onboarding.md in this repository step by step. Facts:
-- name: {name}
-- address: {address}
-- user: {user}
-- platform: {platform}
-- groups: {groups}
-- user notes: {notes}
-
-Use the `flotilla` CLI for every step it covers (`flotilla plan|apply
-<component> {name}`); do not copy config by hand. Read every plan before you
-apply it. Stop and report if a step needs a password, a sudo prompt, or a
-decision from the user. End with `flotilla plan <component> {name}` for every
-component showing no changes, and a short report.
-"""
-
-
-@app.post("/api/onboarding/agent")
-async def run_agent(request: Request) -> dict[str, Any]:
-    b = await request.json()
-    model = b.get("model") or DEFAULT_MODEL
-    effort = b.get("effort") or DEFAULT_EFFORT
-    if effort not in EFFORTS:
-        raise HTTPException(400, f"effort must be one of {EFFORTS}")
-    prompt = AGENT_PROMPT.format(
-        name=b["name"], address=b.get("address", "?"),
-        user=b.get("user", "?"), platform=b.get("platform", "?"),
-        groups=", ".join(b.get("groups", [])), notes=b.get("notes", "-"))
-    argv = ["omp", "-p", "--no-session", "--mode", "json", "--model", model,
-            "--thinking", effort, "--cwd", str(REPO), prompt]
-    env = dict(os.environ)
-    env["PATH"] = (f"{Path(sys.executable).parent}:"
-                   f"{Path('~/.local/bin').expanduser()}:{env['PATH']}")
-
-    def work(emit):
-        emit(f"omp {model} (effort {effort}) in {REPO}")
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, env=env,
-                                stdin=subprocess.DEVNULL)
-        assert proc.stdout
-        for line in proc.stdout:
-            for out in _agent_event(line):
-                emit(runner.mask_plain(out))
-        yield ("exit", proc.wait())
-
-    return _job(jobs.start(f"onboarding agent for {b['name']}", work))
-
-
-def _agent_event(line: str) -> list[str]:
-    try:
-        e = json.loads(line)
-    except ValueError:
-        return [line.rstrip()] if line.strip() else []
-    kind = e.get("type")
-    if kind == "tool_execution_start":
-        args = e.get("args") or {}
-        what = args.get("command") or args.get("path") or ""
-        return [f"▶ {e.get('toolName')}: {e.get('intent') or ''} "
-                f"{shlex.quote(what)[:300] if what else ''}"]
-    if kind == "tool_execution_end":
-        text = "".join(c.get("text", "") for c in
-                       (e.get("result") or {}).get("content", []))
-        lines = text.rstrip().splitlines()
-        tail = lines[:25] + (["…"] if len(lines) > 25 else [])
-        mark = "✗" if e.get("isError") else "  "
-        return [f"{mark} {ln}" for ln in tail]
-    if kind == "message_end":
-        msg = e.get("message") or {}
-        if msg.get("role") == "assistant":
-            return ["", *"".join(c.get("text", "") for c in
-                                 msg.get("content", [])
-                                 if c.get("type") == "text").splitlines()]
-    return []

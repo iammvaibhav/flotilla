@@ -1,18 +1,12 @@
-"""Render the files each component writes on each host."""
+"""Render the files the ssh component writes on each host."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from importlib import resources
-from pathlib import Path
 from typing import Any
 
-import jinja2
-
-from .secrets import REF_IN_TEXT, Resolver
-from .state import Fleet, Host, dump_file, host_files, host_vars, state_dir
-
-OMP_PRUNE_DIRS = ("agents", "rules")
+from .secrets import Resolver
+from .state import Fleet, Host, state_dir
 
 
 @dataclass
@@ -31,18 +25,6 @@ class Rendered:
 
     files: list[FileSpec] = field(default_factory=list)
     data: dict[str, Any] = field(default_factory=dict)
-
-
-def _template(name: str) -> jinja2.Template:
-    override = state_dir() / "templates" / name
-    if override.exists():
-        text = override.read_text()
-    else:
-        text = resources.files("flotilla").joinpath(
-            "templates", name).read_text()
-    return jinja2.Environment(
-        undefined=jinja2.StrictUndefined, keep_trailing_newline=True,
-        trim_blocks=True, lstrip_blocks=True).from_string(text)
 
 
 def ssh_config(fleet: Fleet, ips: bool = False) -> str:
@@ -81,15 +63,11 @@ def known_hosts() -> str:
     return path.read_text()
 
 
-def agents_md(fleet: Fleet, host: Host, vars_: dict[str, Any]) -> str:
-    return _template("AGENTS.md.j2").render(
-        fleet=fleet, me=host, hosts=list(fleet.hosts.values()),
-        notes=(vars_.get("agents_md") or {}).get("notes", []))
-
-
 def render(component: str, fleet: Fleet, host: Host,
            resolver: Resolver) -> Rendered:
     """Render one component for one host. Secrets are resolved."""
+    from .bundles import host_vars  # bundles -> remote -> render
+
     v = resolver.resolve(host_vars(host))
     out = Rendered(data={"vars": v})
     if component == "ssh":
@@ -101,20 +79,6 @@ def render(component: str, fleet: Fleet, host: Host,
                 fleet, ips=not v["ssh"].get("netbird_dns", True))),
             FileSpec("~/.ssh/known_hosts.flotilla", known_hosts()),
         ]
-    elif component == "omp":
-        tree = host_files(host, "omp")
-        for rel, content in tree.items():
-            raw = content if isinstance(content, str) else dump_file(
-                rel, content)
-            # Files that hold secrets are private; leave other modes alone.
-            mode = "600" if REF_IN_TEXT.search(raw) else None
-            text = resolver.resolve_text(raw)
-            out.files.append(FileSpec(f"~/.omp/agent/{rel}", text, mode))
-        out.files.append(FileSpec("~/.omp/agent/AGENTS.md",
-                                  agents_md(fleet, host, v)))
-        out.data["keep"] = {
-            d: sorted(Path(r).name for r in tree if r.startswith(d + "/"))
-            for d in OMP_PRUNE_DIRS}
     return out
 
 

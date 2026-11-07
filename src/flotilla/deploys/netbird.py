@@ -1,7 +1,7 @@
 """NetBird: install the client and join with a setup key (Linux).
 
 Existing peers are left alone. A new or rebuilt machine needs
-``netbird.setup_key`` (an aside:// reference) in its vars, and passwordless
+``netbird.setup_key`` (an aside:// reference) in its settings, and passwordless
 sudo for the install.
 """
 
@@ -20,7 +20,7 @@ elif b["os"] == "darwin":
          "install the NetBird app on macOS by hand, then sign in")
 elif not key_file:
     fail("netbird setup key",
-         "netbird is not connected; set netbird.setup_key in the host vars")
+         "netbird is not connected; set netbird.setup_key in its settings")
 elif not fact("sudo -n true && echo yes"):
     fail("netbird needs sudo", "passwordless sudo is required to install")
 else:

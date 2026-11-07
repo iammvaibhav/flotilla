@@ -8,9 +8,9 @@ inventory host) and runs the deploy for those hosts only.
 Hosts are matched by name, then by address (the two inventories can use
 different names for the same machine). Of an existing entry, flotilla only
 updates ``address`` and ``dns`` when the machine moved, and ``services``
-as the layered ``paseo.services`` vars ask; the rest belongs to the Paseo
+as the layered ``paseo.services`` setting asks; the rest belongs to the Paseo
 deploy. ``paseo.services`` is a map: ``true`` adds a service, ``false``
-removes it, a service the vars do not mention is left as it is::
+removes it, a service the settings do not mention is left as it is::
 
     paseo:
       services:
@@ -25,7 +25,8 @@ import shlex
 from typing import Any, Iterator
 
 from . import remote
-from .state import Fleet, Host, host_vars
+from .bundles import host_vars
+from .state import Fleet, Host
 
 DEFAULTS = {
     "enabled": True,
@@ -39,7 +40,8 @@ def settings(fleet: Fleet) -> dict[str, Any]:
     v = (host_vars(fleet.host(fleet.controller)).get("paseo") or {})
     out = {**DEFAULTS, **{k: v[k] for k in DEFAULTS if k in v}}
     if not out["inventory_host"]:
-        raise RuntimeError("set paseo.inventory_host in vars/all.yaml")
+        raise RuntimeError("set paseo.inventory_host in "
+                           "settings/base/flotilla.yml")
     return out
 
 

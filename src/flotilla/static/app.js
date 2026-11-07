@@ -7,6 +7,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"];
+const ago = (t) => { const s = Math.round(Date.now() / 1000 - t); return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -15,22 +16,17 @@ async function api(path, opts = {}) {
   });
   if (res.status === 401) { location.href = "/login"; throw new Error("login"); }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.detail || data.error || res.statusText), { data, status: res.status });
+  if (!res.ok) throw Object.assign(new Error(data.detail || data.error || (data.problems || []).join("\n") || res.statusText), { data, status: res.status });
   return data;
 }
 
 /** Stream a job's log into `pre`; resolve with the job summary. */
-function follow(jobId, pre, onLine) {
+function follow(jobId, pre) {
   pre.hidden = false;
   pre.textContent = "";
   return new Promise((resolve) => {
     const es = new EventSource(`/api/jobs/${jobId}/stream`);
-    es.onmessage = (e) => {
-      const line = JSON.parse(e.data);
-      pre.textContent += line + "\n";
-      pre.scrollTop = pre.scrollHeight;
-      onLine && onLine(line);
-    };
+    es.onmessage = (e) => { pre.textContent += JSON.parse(e.data) + "\n"; pre.scrollTop = pre.scrollHeight; };
     es.addEventListener("done", (e) => { es.close(); resolve(JSON.parse(e.data)); });
     es.onerror = () => { es.close(); resolve({ status: "failed" }); };
   });
@@ -47,9 +43,10 @@ function colorDiff(text) {
 let fleet = null;
 $$("nav button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 function showTab(name) {
+  if (!$(`#tab-${name}`)) name = "hosts";
   $$("nav button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
   $$("main > section").forEach((s) => (s.hidden = s.id !== `tab-${name}`));
-  ({ jobs: loadJobs, config: initConfig, onboard: initOnboard }[name] || (() => {}))();
+  ({ jobs: loadJobs, config: initConfig }[name] || (() => {}))();
   history.replaceState(null, "", `#${name}`);
 }
 
@@ -127,23 +124,7 @@ function openHost(name) {
   $("#cmdf").onsubmit = (e) => { e.preventDefault(); const c = $("#cmd").value.trim(); if (c) run(c); };
   $("#cmd").focus();
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#drawer").hidden = true; });
-
-$("#mesh-btn").addEventListener("click", async () => {
-  const box = $("#mesh");
-  box.innerHTML = `<h2>SSH mesh</h2><pre class="log mono"></pre>`;
-  const { job } = await api("/api/mesh", { method: "POST" });
-  await follow(job, $("pre", box));
-  const r = (await api(`/api/jobs/${job}`)).result;
-  if (!r) return;
-  const cols = [...r.hosts, "github"];
-  box.innerHTML = `<h2>SSH mesh <span class="muted">(row → column)</span></h2><table class="mono"><tr><th></th>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr>
-    ${r.hosts.map((src) => `<tr><th>${esc(src)}</th>${cols.map((dst) => {
-      if (src === dst) return `<td class="muted">—</td>`;
-      const v = r.cells[src]?.[dst] ?? "?";
-      return `<td class="${v === "ok" ? "ok" : "bad"}" title="${esc(v)}">${v === "ok" ? "✓" : "✗"}</td>`;
-    }).join("")}</tr>`).join("")}</table>`;
-});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { $("#drawer").hidden = true; closeMenu(); } });
 
 // ------------------------------------------------------------------ components
 const planCache = {};
@@ -201,66 +182,335 @@ async function showCell(c, h) {
 $("#plan-all").addEventListener("click", async () => { for (const c of Object.keys(fleet.components)) await plan(c); });
 
 // ------------------------------------------------------------------ config
-let editor = null, curPath = null, models = [];
-async function initConfig() {
-  if (!editor) {
-    editor = new EditorView({
-      parent: $("#editor"),
-      extensions: [basicSetup, yaml(), autocompletion({ override: [modelCompletions] }), EditorView.lineWrapping,
-        ...(matchMedia("(prefers-color-scheme: dark)").matches ? [oneDark] : [])],
-    });
-    $("#sec-acc").innerHTML = (fleet.vault_accounts || []).map((a) => `<option>${esc(a)}</option>`).join("");
-    $("#model-effort").innerHTML += EFFORTS.map((e) => `<option>${e}</option>`).join("");
-    $("#prev-host").innerHTML = fleet.hosts.map((h) => `<option>${esc(h.name)}</option>`).join("");
-    api("/api/catalog/models").then((m) => { models = m; $("#model-count").textContent = `(${m.length})`; renderModels(); }).catch((e) => ($("#models").textContent = e.message));
-  }
-  const files = await api("/api/state/tree");
-  const byDir = {};
-  for (const f of files) (byDir[f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : ""] ||= []).push(f);
-  $("#tree").innerHTML = Object.keys(byDir).sort().map((dir) => `<div class="dir">${esc(dir || "/")}</div>` +
-    byDir[dir].map((f) => `<div data-f="${esc(f)}" class="${f === curPath ? "on" : ""}">&nbsp;&nbsp;${esc(f.slice(dir ? dir.length + 1 : 0))}</div>`).join("")).join("");
-  $$("#tree [data-f]").forEach((el) => (el.onclick = () => openFile(el.dataset.f)));
-  $("#history").innerHTML = (await api("/api/state/history")).map(esc).join("<br>");
-  if (!curPath && files.includes("files/omp/all/config.yml")) openFile("files/omp/all/config.yml");
+// One bundle at a time: its files (or items), and for one file either the
+// file each host ends up with (with where each key comes from), the diff
+// against a host, or one layer's file in an editor.
+const C = { list: [], b: null, file: null, view: "compiled", host: null, item: null, models: [] };
+
+const layerKind = (id) => id === "base" ? "base" : id.split(":")[0];
+const layerShort = (id) => id === "base" ? "base" : id.split(":")[1];
+const chip = (id, extra = "") => `<span class="chip ${layerKind(id)} ${extra}" title="${esc(id)}">${esc(layerShort(id))}</span>`;
+const layerDir = (id) => id === "base" ? "base" : `${id.split(":")[0]}s/${id.split(":")[1]}`;
+const statePath = (b, layer, rel) => b.name === "settings" ? `settings/${layerDir(layer)}/${rel}` : `bundles/${b.name}/${layerDir(layer)}/${rel}`;
+const allLayers = () => ["base", ...Object.keys(fleet.groups).map((g) => `group:${g}`), ...fleet.hosts.map((h) => `host:${h.name}`)];
+
+function planBadge(b) {
+  if (!b.deployable) return `<span class="pill">settings</span>`;
+  const p = b.plan;
+  if (!p) return `<span class="pill">not planned</span>`;
+  const n = Object.keys(p.plan || {}).length, e = Object.keys(p.errors || {}).length;
+  return [n ? `<span class="pill warn" title="${esc(Object.keys(p.plan).join(", "))}">${n} out of date</span>` : "",
+    e ? `<span class="pill bad" title="${esc(Object.entries(p.errors).map(([h, m]) => `${h}: ${m}`).join("\n"))}">${e} offline</span>` : "",
+    !n && !e ? `<span class="pill ok">in sync</span>` : ""].join(" ");
 }
 
-async function openFile(path) {
-  const { content } = await api(`/api/state/file?path=${encodeURIComponent(path)}`);
-  curPath = path;
-  $("#cur").textContent = path;
-  editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: content } });
-  $$("#tree [data-f]").forEach((el) => el.classList.toggle("on", el.dataset.f === path));
-  $("#save-msg").innerHTML = "";
+async function initConfig() {
+  if (!C.models.length) api("/api/catalog/models").then((m) => (C.models = m)).catch(() => {});
+  await loadBundles();
+  loadHistory();
+  if (!C.b) openBundle((C.list.find((b) => b.name === "omp") || C.list[0]).name);
+}
+
+async function loadBundles() {
+  C.list = await api("/api/bundles");
+  $("#blist").innerHTML = C.list.map((b) => `<div class="bi ${C.b?.name === b.name ? "on" : ""}" data-b="${esc(b.name)}">
+      <div class="nm"><span>${esc(b.name === "settings" ? "Flotilla settings" : b.name)}</span></div>
+      <div class="ds muted mono">${esc(b.dest || "used by components")}</div>
+      <div style="margin-top:.25rem">${planBadge(b)}</div></div>`).join("");
+  $$("#blist [data-b]").forEach((el) => (el.onclick = () => openBundle(el.dataset.b)));
+}
+
+async function loadHistory() {
+  $("#history").innerHTML = (await api("/api/state/history")).map(esc).join("<br>");
+}
+
+async function openBundle(name, keepFile = false) {
+  C.b = await api(`/api/bundles/${encodeURIComponent(name)}`);
+  if (!keepFile) { C.file = null; C.item = null; C.view = "compiled"; }
+  C.host ||= fleet.controller;
+  $$("#blist [data-b]").forEach((el) => el.classList.toggle("on", el.dataset.b === name));
+  renderBundle();
+}
+
+function renderBundle() {
+  const b = C.b;
+  const p = b.plan;
+  $("#bundle").innerHTML = `
+    <div class="row" style="align-items:baseline">
+      <h2 style="margin:0">${esc(b.name === "settings" ? "Flotilla settings" : b.name)}</h2>
+      <span class="muted">${esc(b.description)}</span>
+      <span style="flex:1"></span>
+      ${b.deployable ? `<button class="b" id="bplan">Plan</button><button class="b danger" id="bapply">Apply…</button>` : ""}
+    </div>
+    <div class="muted" style="margin:.3rem 0 .2rem">
+      ${b.deployable ? `Goes to <span class="mono">${esc(b.dest)}</span> on every host.` : "Not copied to hosts: the components read these."}
+      Layers: ${chip("base")} → groups → hosts; the most specific wins.
+      ${b.owned.length ? `Owned folders (extra files deleted): <span class="mono">${esc(b.owned.join(", "))}</span>.` : ""}
+      ${b.after_apply ? `After apply it runs <span class="mono" title="${esc(b.after_apply)}">a script</span> (see bundle.yaml).` : ""}
+    </div>
+    ${b.deployable ? `<div class="muted" style="font-size:12.5px">${p ? `Planned ${ago(p.at)}: ${planBadge(b)} ${Object.entries(p.plan || {}).map(([h, ops]) => `<span class="mono">${esc(h)}</span> (${ops.length})`).join(", ")}` : "Not planned yet."}</div>` : ""}
+    ${b.readme ? `<details class="panel readme" style="margin-top:.7rem"><summary>How this bundle works</summary>${marked.parse(b.readme)}</details>` : ""}
+    <pre class="log mono" id="blog" hidden></pre>
+    <div id="bbody" style="margin-top:.8rem"></div>
+    <div id="fview"></div>`;
+  if (b.deployable) { $("#bplan").onclick = () => bundlePlan(); $("#bapply").onclick = () => bundleApply(); }
+  if (b.unit === "directory") renderItems(); else renderFiles(b.files);
+  if (C.file) renderFile();
+}
+
+function renderFiles(files, title = "") {
+  const hosts = fleet.hosts.map((h) => h.name);
+  $("#bbody").innerHTML = `${title}<table class="files" style="width:100%">
+    <tr><th>File on the host</th><th>Layers</th>${hosts.map((h) => `<th class="mono" style="font-size:11.5px">${esc(h)}</th>`).join("")}</tr>
+    ${files.map((f) => `<tr data-rel="${esc(f.rel)}" class="${C.file === f.rel ? "on" : ""}">
+      <td><span class="mono">${esc(f.out)}</span>${f.out !== f.rel ? ` <span class="muted" style="font-size:11.5px">from ${esc(f.rel)}</span>` : ""}
+        <div class="muted" style="font-size:11.5px">${f.merge === "keys" ? "merged by key" : "whole file"}</div></td>
+      <td>${f.layers.map((l) => chip(l)).join("")}</td>
+      ${hosts.map((h) => { const src = C.b.hosts[h]?.files?.[f.out]; return `<td style="text-align:center">${src ? src.filter((s) => s !== "base").map((s) => chip(s)).join("") || `<span class="muted">base</span>` : `<span class="muted">—</span>`}</td>`; }).join("")}
+    </tr>`).join("")}</table>
+    <div class="row" style="margin-top:.5rem"><input id="newrel" class="mono" placeholder="new file, e.g. rules/foo.md" style="width:280px">
+      <select id="newlayer">${allLayers().map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
+      <button class="b" id="newfile">Add file</button></div>`;
+  $$("#bbody [data-rel]").forEach((tr) => (tr.onclick = () => { C.file = tr.dataset.rel; C.view = "compiled"; renderBundle(); $("#fview").scrollIntoView({ behavior: "smooth" }); }));
+  $("#newfile").onclick = () => {
+    const rel = $("#newrel").value.trim();
+    if (!rel) return;
+    C.file = rel; C.view = `layer:${$("#newlayer").value}`; renderBundle();
+  };
+}
+
+function renderItems() {
+  const b = C.b, hosts = fleet.hosts.map((h) => h.name);
+  const items = new Set(Object.keys(b.marks));
+  for (const f of b.files) items.add(f.rel.split("/")[0]);
+  const rows = [...items].sort();
+  $("#bbody").innerHTML = `<p class="muted" style="margin:.2rem 0 .5rem">One folder per item. A cell shows the layer whose copy that host gets; click it to skip or delete it there. Click a name for its files.</p>
+    <table class="items" style="width:100%"><tr><th>${rows.length} items</th>${hosts.map((h) => `<th class="mono">${esc(h)}</th>`).join("")}</tr>
+    ${rows.map((it) => `<tr><td><a href="#" data-item="${esc(it)}" style="color:inherit">${esc(it)}</a></td>${hosts.map((h) => {
+      const hp = b.hosts[h] || {};
+      const src = hp.items?.[it];
+      const cell = src ? chip(src) : hp.skipped?.includes(it) ? `<span class="chip skip">skip</span>` : hp.delete?.includes(it) ? `<span class="chip delete">delete</span>` : `<span class="muted">—</span>`;
+      return `<td class="c" data-it="${esc(it)}" data-h="${esc(h)}">${cell}</td>`;
+    }).join("")}</tr>`).join("")}</table>`;
+  $$("#bbody [data-item]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); showItem(a.dataset.item); }));
+  $$("#bbody td.c").forEach((td) => (td.onclick = (e) => itemMenu(e, td.dataset.it, td.dataset.h)));
+}
+
+function showItem(item) {
+  C.item = item;
+  const files = C.b.files.filter((f) => f.rel === item || f.rel.startsWith(item + "/"));
+  const box = document.createElement("div");
+  $("#fview").innerHTML = `<h2>${esc(item)}</h2>`;
+  $("#fview").appendChild(box);
+  box.innerHTML = `<table class="files" style="width:100%"><tr><th>File</th><th>Layers</th></tr>${files.map((f) => `<tr data-rel="${esc(f.rel)}"><td class="mono">${esc(f.rel)}</td><td>${f.layers.map((l) => chip(l)).join("")}</td></tr>`).join("")}</table>`;
+  $$("[data-rel]", box).forEach((tr) => (tr.onclick = () => {
+    const f = files.find((x) => x.rel === tr.dataset.rel);
+    C.file = f.rel; C.view = `layer:${f.layers[f.layers.length - 1]}`; renderFile();
+  }));
+}
+
+function closeMenu() { $$(".menu").forEach((m) => m.remove()); }
+document.addEventListener("click", (e) => { if (!e.target.closest(".menu") && !e.target.closest("td.c")) closeMenu(); });
+
+function itemMenu(e, item, host) {
+  closeMenu();
+  const h = fleet.hosts.find((x) => x.name === host);
+  const marks = C.b.marks[item] || {};
+  const opts = [[`Skip on ${host}`, `host:${host}`, "skip"], [`Delete on ${host}`, `host:${host}`, "delete"],
+    ...h.groups.map((g) => [`Skip for group ${g}`, `group:${g}`, "skip"])];
+  for (const [lid, kind] of Object.entries(marks)) opts.push([`Undo ${kind} in ${lid}`, lid, null]);
+  const m = document.createElement("div");
+  m.className = "menu";
+  m.innerHTML = `<div class="h">${esc(item)} on ${esc(host)}</div>` + opts.map(([label], i) => `<div data-o="${i}">${esc(label)}</div>`).join("");
+  m.style.left = `${e.pageX}px`; m.style.top = `${e.pageY}px`;
+  document.body.appendChild(m);
+  $$("[data-o]", m).forEach((el) => (el.onclick = async () => {
+    const [, layer, state] = opts[el.dataset.o];
+    closeMenu();
+    try { await api(`/api/bundles/${C.b.name}/item`, { method: "POST", body: { layer, item, state } }); }
+    catch (err) { return alert(err.message); }
+    await openBundle(C.b.name, true); loadBundles(); loadHistory();
+  }));
+}
+
+function fileInfo(rel) { return C.b.files.find((f) => f.rel === rel) || { rel, out: rel, layers: [], merge: "whole" }; }
+
+function renderFile() {
+  C.seq = (C.seq || 0) + 1;
+  const f = fileInfo(C.file);
+  const hostSel = `<select id="fhost">${fleet.hosts.map((h) => `<option ${h.name === C.host ? "selected" : ""}>${esc(h.name)}</option>`).join("")}</select>`;
+  const layerTabs = f.layers.map((l) => `<span class="t ${C.view === `layer:${l}` ? "on" : ""}" data-v="layer:${esc(l)}">edit ${chip(l)}</span>`).join("");
+  const missing = allLayers().filter((l) => !f.layers.includes(l));
+  const box = $("#fview");
+  box.innerHTML = `<h2 class="mono" style="margin-bottom:0">${esc(f.out)}</h2>
+    <div class="tabs">
+      <span class="t ${C.view === "compiled" ? "on" : ""}" data-v="compiled">What a host gets</span>
+      ${C.b.deployable ? `<span class="t ${C.view === "diff" ? "on" : ""}" data-v="diff">Diff on host</span>` : ""}
+      ${["compiled", "diff"].includes(C.view) ? hostSel : ""}
+      <span style="width:1rem"></span>${layerTabs}
+      <select id="addlayer"><option value="">+ override file for…</option>${missing.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
+    </div>
+    <div id="fbody"></div>`;
+  $$(".tabs [data-v]", box).forEach((t) => (t.onclick = () => { C.view = t.dataset.v; renderFile(); }));
+  if ($("#fhost")) $("#fhost").onchange = (e) => { C.host = e.target.value; renderFile(); };
+  $("#addlayer").onchange = (e) => { if (e.target.value) { C.view = `layer:${e.target.value}`; renderFile(); } };
+  if (C.view === "compiled") showCompiled(f);
+  else if (C.view === "diff") showDiff();
+  else showLayer(f, C.view.slice(6));
+}
+
+async function showCompiled(f) {
+  const body = $("#fbody"), seq = C.seq;
+  body.innerHTML = `<div class="muted">loading…</div>`;
+  let r;
+  try { r = await api(`/api/bundles/${C.b.name}/compiled?host=${encodeURIComponent(C.host)}&file=${encodeURIComponent(f.out)}`); }
+  catch (e) { if (seq === C.seq) body.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; return; }
+  if (seq !== C.seq) return;   // a newer render replaced this view
+  const own = r.own_keys.length ? `<p class="muted">Flotilla sets only <span class="mono">${esc(r.own_keys.join(", "))}</span> in this file; the rest of it on the host is left alone.</p>` : "";
+  if (!r.explain) {
+    body.innerHTML = `${own}<p>${esc(C.host)} gets this whole file from ${chip(r.sources[r.sources.length - 1])}.</p><pre class="log mono">${esc(r.text)}</pre>`;
+    return;
+  }
+  body.innerHTML = `${own}<div class="row muted" style="margin-bottom:.4rem">${r.explain.length} keys for <b>${esc(C.host)}</b>. Rows tinted: set by a group or host override.
+      <span style="flex:1"></span><label class="row"><input type="checkbox" id="raw"> show the file</label></div>
+    <div id="ovslot"></div>
+    <table class="explain" style="width:100%"><tr><th>Key</th><th>Value</th><th>Set by</th><th></th></tr>
+    ${r.explain.map((row, i) => { const over = row.sources.some((s) => !s.startsWith("base")); return `<tr class="${over ? "ovr" : ""}">
+      <td class="k">${esc(row.key)}</td><td class="v">${esc(short(row.value))}</td>
+      <td>${row.sources.map((s) => { const op = /[+-]$/.test(s) ? s.slice(-1) : ""; return chip(op ? s.slice(0, -1) : s) + (op ? `<span class="muted">${op}</span>` : ""); }).join(" ")}</td>
+      <td style="white-space:nowrap"><button class="b sm" data-ov="${i}">Override…</button>
+        ${row.sources.filter((s) => !s.startsWith("base")).map((s) => s.replace(/[+-]$/, "")).filter((s, j, a) => a.indexOf(s) === j).map((s) => `<button class="b sm" data-clr="${i}" data-l="${esc(s)}" title="remove from ${esc(s)}">clear ${esc(layerShort(s))}</button>`).join("")}</td></tr>`; }).join("")}
+    </table><pre class="log mono" id="rawtext" hidden>${esc(r.text)}</pre>`;
+  $("#raw", body).onchange = (e) => ($("#rawtext", body).hidden = !e.target.checked);
+  $$("[data-ov]", body).forEach((b) => (b.onclick = () => overrideBox(f, r.explain[b.dataset.ov])));
+  $$("[data-clr]", body).forEach((b) => (b.onclick = async () => {
+    const row = r.explain[b.dataset.clr];
+    if (!confirm(`Remove the ${row.key} override from ${b.dataset.l}?`)) return;
+    try { await api(`/api/bundles/${C.b.name}/override`, { method: "POST", body: { layer: b.dataset.l, file: f.rel, key: row.key, clear: true } }); }
+    catch (e) { return alert(e.message); }
+    await refreshBundle();
+  }));
+}
+
+const short = (v) => { const s = typeof v === "string" ? v : JSON.stringify(v); return s.length > 220 ? s.slice(0, 220) + "…" : s; };
+
+function overrideBox(f, row) {
+  const h = fleet.hosts.find((x) => x.name === C.host);
+  const targets = [...h.groups.map((g) => `group:${g}`), `host:${h.name}`,
+    ...allLayers().filter((l) => l !== "base" && !h.groups.map((g) => `group:${g}`).includes(l) && l !== `host:${h.name}`)];
+  const isList = Array.isArray(row.value);
+  $("#ovslot").innerHTML = `<div class="ovbox">
+    <b style="grid-column:1/-1" class="mono">${esc(row.key)}</b>
+    <label>For</label><select id="ovl">${targets.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join("")}</select>
+    <label>Change</label><select id="ovop">
+      <option value="">set this value</option>
+      ${isList ? `<option value="+">add these items to the list</option><option value="-">remove these items from the list</option>` : ""}
+      <option value="!">replace whole (no merge)</option></select>
+    <label>Value (YAML)</label><textarea id="ovv">${esc(JSON.stringify(row.value, null, 1))}</textarea>
+    <span></span><div class="row"><button class="b pri" id="ovsave">Save override</button><button class="b" id="ovcancel">Cancel</button>
+      <span class="muted">Writes only this key into ${esc(f.rel)} of that layer. Use an aside:// reference for secrets.</span></div>
+    <div id="ovmsg" style="grid-column:1/-1"></div></div>`;
+  $("#ovop").onchange = (e) => { if (["+", "-"].includes(e.target.value)) $("#ovv").value = "[]"; };
+  $("#ovcancel").onclick = () => ($("#ovslot").innerHTML = "");
+  $("#ovsave").onclick = async () => {
+    try {
+      await api(`/api/bundles/${C.b.name}/override`, { method: "POST", body: { layer: $("#ovl").value, file: f.rel, key: row.key, op: $("#ovop").value, value: $("#ovv").value } });
+    } catch (e) { $("#ovmsg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; return; }
+    await refreshBundle();
+  };
+}
+
+async function refreshBundle() {
+  await openBundle(C.b.name, true);
+  loadBundles(); loadHistory();
+}
+
+async function showDiff() {
+  const body = $("#fbody");
+  body.innerHTML = `<pre class="log mono diff">loading…</pre>`;
+  try {
+    const r = await api(`/api/bundles/${C.b.name}/diff?host=${encodeURIComponent(C.host)}`);
+    $("pre", body).innerHTML = r.diffs.length ? r.diffs.map((x) => colorDiff(x.diff)).join("\n") : esc(r.note || `${C.host} already has what this bundle puts there.`);
+  } catch (e) { $("pre", body).textContent = e.message; }
+}
+
+let editor = null;
+async function showLayer(f, layer) {
+  const path = statePath(C.b, layer, f.rel);
+  const body = $("#fbody"), seq = C.seq;
+  const { content, new: isNew } = await api(`/api/state/file?path=${encodeURIComponent(path)}`);
+  if (seq !== C.seq) return;   // a newer render replaced this view
+  body.innerHTML = `<div class="edit"><div>
+      <div class="row" style="margin-bottom:.4rem"><span class="mono muted">${esc(path)}</span>${isNew ? `<span class="pill">new file</span>` : ""}<span style="flex:1"></span>
+        ${isNew ? "" : `<button class="b" id="fdel">Delete this file</button>`}<button class="b pri" id="fsave">Save</button></div>
+      <div class="muted" style="font-size:12.5px;margin-bottom:.4rem">${layer === "base" ? "The full file for every host." : f.merge === "keys" ? "Only the keys this layer changes: <span class=mono>a.b: value</span>, <span class=mono>list+: [x]</span> adds, <span class=mono>list-: [x]</span> removes, <span class=mono>key!:</span> replaces, <span class=mono>key: ~</span> deletes." : "Replaces the whole file for this layer's hosts."}</div>
+      <div id="editor"></div><div id="fmsg"></div></div>
+    <div>
+      <div class="panel"><h4>Models</h4><input id="model-q" placeholder="Search models…" style="width:100%">
+        <div class="row" style="margin:.4rem 0"><select id="model-effort"><option value="">no effort</option>${EFFORTS.map((e) => `<option>${e}</option>`).join("")}</select><span class="muted">click to insert</span></div>
+        <div class="models" id="models"></div></div>
+      <div class="panel"><h4>Store a secret</h4><div style="display:grid;gap:.4rem">
+        <select id="sec-acc">${(fleet.vault_accounts || []).map((a) => `<option>${esc(a)}</option>`).join("")}</select>
+        <input id="sec-title" placeholder="Title (e.g. flotilla: omp models.yml foo apiKey)">
+        <input id="sec-val" type="password" placeholder="Secret value">
+        <button class="b" id="sec-save">Store in aside-vault and insert reference</button></div></div>
+    </div></div>`;
+  editor = new EditorView({
+    parent: $("#editor"), doc: content,
+    extensions: [basicSetup, yaml(), autocompletion({ override: [modelCompletions] }), EditorView.lineWrapping,
+      ...(matchMedia("(prefers-color-scheme: dark)").matches ? [oneDark] : [])],
+  });
+  renderModels();
+  if (C.flash) { $("#fmsg").innerHTML = C.flash; C.flash = ""; }
+  $("#model-q").oninput = renderModels;
+  $("#fsave").onclick = async () => {
+    try {
+      const r = await api("/api/state/file", { method: "PUT", body: { path, content: editor.state.doc.toString() } });
+      C.flash = `<div class="msg okm">Saved and committed. ${r.warnings.map(esc).join("<br>")} Re-planning in the background; Plan or Apply above to roll it out.</div>`;
+      await openBundle(C.b.name, true); loadBundles(); loadHistory();
+    } catch (e) { $("#fmsg").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  };
+  if ($("#fdel")) $("#fdel").onclick = async () => {
+    if (!confirm(`Delete ${path}?`)) return;
+    await api(`/api/state/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+    C.view = "compiled"; await openBundle(C.b.name, true); loadBundles(); loadHistory();
+  };
+  $("#sec-save").onclick = async () => {
+    const title = $("#sec-title").value.trim(), value = $("#sec-val").value;
+    if (!title || !value) return alert("Title and value are required.");
+    const { ref } = await api("/api/secrets", { method: "POST", body: { account: $("#sec-acc").value, title, value } });
+    $("#sec-val").value = "";
+    insert(ref);
+  };
 }
 
 function modelCompletions(ctx) {
   const word = ctx.matchBefore(/[\w./@:-]+/);
-  if (!word || (word.from === word.to && !ctx.explicit) || !models.length) return null;
+  if (!word || (word.from === word.to && !ctx.explicit) || !C.models.length) return null;
   const text = word.text;
   const colon = text.indexOf(":");
   if (colon > 0) {
-    const m = models.find((x) => x.selector === text.slice(0, colon));
+    const m = C.models.find((x) => x.selector === text.slice(0, colon));
     if (!m) return null;
     return { from: word.from + colon + 1, options: (m.thinking.length ? m.thinking : EFFORTS).map((e) => ({ label: e, type: "keyword" })) };
   }
   if (text.length < 2) return null;
   return {
     from: word.from,
-    options: models.map((m) => ({ label: m.selector, detail: `${m.kind}${m.thinking.length ? " · " + m.thinking.join("/") : ""}`, info: m.name, type: "constant" })),
+    options: C.models.map((m) => ({ label: m.selector, detail: `${m.kind}${m.thinking.length ? " · " + m.thinking.join("/") : ""}`, info: m.name, type: "constant" })),
     validFor: /^[\w./@-]*$/,
   };
 }
 
 function renderModels() {
-  const q = $("#model-q").value.toLowerCase();
-  const list = models.filter((m) => !q || m.selector.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q)).slice(0, 200);
-  $("#models").innerHTML = list.map((m) => `<div data-sel="${esc(m.selector)}" title="${esc(m.name)} · ${esc(m.kind)}"><span class="mono">${esc(m.selector)}</span> <span class="muted">${esc(m.thinking.join("/"))}</span></div>`).join("");
+  const q = ($("#model-q")?.value || "").toLowerCase();
+  const list = C.models.filter((m) => !q || m.selector.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q)).slice(0, 200);
+  $("#models").innerHTML = list.map((m) => `<div data-sel="${esc(m.selector)}" title="${esc(m.name)} · ${esc(m.kind)}"><span class="mono">${esc(m.selector)}</span> <span class="muted">${esc(m.thinking.join("/"))}</span></div>`).join("") || `<span class="muted">loading the catalog…</span>`;
   $$("#models [data-sel]").forEach((el) => (el.onclick = () => {
     const eff = $("#model-effort").value;
     insert(el.dataset.sel + (eff ? `:${eff}` : ""));
   }));
 }
-$("#model-q").addEventListener("input", renderModels);
 
 function insert(text) {
   const { from, to } = editor.state.selection.main;
@@ -268,72 +518,25 @@ function insert(text) {
   editor.focus();
 }
 
-$("#save").addEventListener("click", async () => {
-  if (!curPath) return;
-  const box = $("#save-msg");
-  try {
-    const r = await api("/api/state/file", { method: "PUT", body: { path: curPath, content: editor.state.doc.toString() } });
-    box.innerHTML = `<div class="msg okm">Saved and committed.${r.warnings.length ? "<br>" + r.warnings.map(esc).join("<br>") : ""} Go to Components → Plan to roll it out.</div>`;
-    initConfig();
-  } catch (e) {
-    box.innerHTML = `<div class="msg err">${(e.data?.problems || [e.message]).map(esc).join("<br>")}</div>`;
-  }
-});
-$("#del").addEventListener("click", async () => {
-  if (curPath && confirm(`Delete ${curPath}?`)) { await api(`/api/state/file?path=${encodeURIComponent(curPath)}`, { method: "DELETE" }); curPath = null; initConfig(); }
-});
-$("#create").addEventListener("click", async () => {
-  const p = $("#newfile").value.trim();
-  if (!p) return;
-  await api("/api/state/file", { method: "PUT", body: { path: p, content: "" } });
-  await initConfig(); openFile(p);
-});
-$("#sec-save").addEventListener("click", async () => {
-  const title = $("#sec-title").value.trim(), value = $("#sec-val").value;
-  if (!title || !value) return alert("Title and value are required.");
-  const { ref } = await api("/api/secrets", { method: "POST", body: { account: $("#sec-acc").value, title, value } });
-  $("#sec-val").value = "";
-  insert(ref);
-});
-$("#prev").addEventListener("click", async () => {
-  const d = $("#drawer");
-  d.hidden = false;
-  d.innerHTML = `<div class="row"><h2 style="margin:0;flex:1">${esc($("#prev-comp").value)} diff on ${esc($("#prev-host").value)}</h2><button class="b" id="dclose">Close</button></div><pre class="log mono diff" id="pdiff">loading…</pre>`;
-  $("#dclose").onclick = () => (d.hidden = true);
-  try {
-    const r = await api(`/api/components/${$("#prev-comp").value}/diff?host=${encodeURIComponent($("#prev-host").value)}`);
-    $("#pdiff").innerHTML = r.diffs.length ? r.diffs.map((x) => colorDiff(x.diff)).join("\n") : "files match";
-  } catch (e) { $("#pdiff").textContent = e.message; }
-});
+async function bundlePlan() {
+  const { job } = await api(`/api/bundles/${C.b.name}/plan`, { method: "POST", body: {} });
+  await follow(job, $("#blog"));
+  await refreshBundle();
+}
 
-// ------------------------------------------------------------------ onboarding
-let onbReady = false;
-async function initOnboard() {
-  if (onbReady) return;
-  onbReady = true;
-  $("#onb-groups").innerHTML = Object.keys(fleet.groups).map((g) => `<label class="row"><input type="checkbox" name="groups" value="${esc(g)}" ${g === "personal" ? "checked" : ""}> ${esc(g)}</label>`).join("");
-  $("[name=effort]").innerHTML = EFFORTS.map((e) => `<option ${e === "high" ? "selected" : ""}>${e}</option>`).join("");
-  api("/api/onboarding/guide").then((g) => ($("#guide").innerHTML = marked.parse(g.markdown)));
-  api("/api/catalog/models").then((m) => ($("#chat-models").innerHTML = m.filter((x) => x.kind === "chat").map((x) => `<option value="${esc(x.selector)}">`).join(""))).catch(() => {});
+async function bundleApply() {
+  const { job } = await api(`/api/bundles/${C.b.name}/plan`, { method: "POST", body: {} });
+  await follow(job, $("#blog"));
+  const info = await api(`/api/jobs/${job}`);
+  const plan = info.result?.plan || {};
+  const targets = Object.keys(plan);
+  if (!targets.length) { await refreshBundle(); return alert(`${C.b.name}: every reachable host is in sync.`); }
+  const lines = targets.map((h) => `${h}:\n  ${plan[h].join("\n  ")}`).join("\n");
+  if (!confirm(`Apply ${C.b.name} to ${targets.join(", ")}?\n\n${lines}`)) return;
+  const run = await api(`/api/bundles/${C.b.name}/apply`, { method: "POST", body: { hosts: targets } });
+  await follow(run.job, $("#blog"));
+  await refreshBundle();
 }
-function onbData() {
-  const f = new FormData($("#onb"));
-  return {
-    name: f.get("name"), address: f.get("address"), user: f.get("user"), platform: f.get("platform"),
-    groups: f.getAll("groups"), names: String(f.get("names") || "").split(",").map((s) => s.trim()).filter(Boolean),
-    notes: f.get("notes"), model: f.get("model"), effort: f.get("effort"),
-  };
-}
-$("#onb-add").addEventListener("click", async () => {
-  if (!$("#onb").reportValidity()) return;
-  try { await api("/api/onboarding/hosts", { method: "POST", body: onbData() }); alert("Added to hosts.yaml."); await loadFleet(); loadStatus(); }
-  catch (e) { alert(e.message); }
-});
-$("#onb-run").addEventListener("click", async () => {
-  if (!$("#onb").reportValidity()) return;
-  const { job } = await api("/api/onboarding/agent", { method: "POST", body: onbData() });
-  follow(job, $("#onb-log"));
-});
 
 // ------------------------------------------------------------------ jobs
 async function loadJobs() {

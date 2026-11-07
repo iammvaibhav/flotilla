@@ -130,7 +130,9 @@ def literal_secrets(data: Any, path: str = "") -> list[tuple[str, str]]:
     if isinstance(data, dict):
         for key, val in data.items():
             sub = f"{path}.{key}" if path else str(key)
-            if isinstance(val, str) and SECRET_KEY.match(str(key)) \
+            # Override keys: `a.b.apiKey` and `apiKey!` name an apiKey too.
+            name = str(key).rstrip("+-!").rsplit(".", 1)[-1]
+            if isinstance(val, str) and SECRET_KEY.match(name) \
                     and val and not is_ref(val) \
                     and not val.startswith(("$", "!")):
                 found.append((sub, val))

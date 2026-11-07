@@ -1,4 +1,8 @@
-"""Turn rendered state into pyinfra runs, and diff files before a run."""
+"""Turn rendered state into pyinfra runs, and diff files before a run.
+
+Components install and log in (keys, CLIs, NetBird, the Paseo deploy).
+Config files are bundles (see bundles.py), managed from the Config page.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from . import paseo, paseo_models, remote
+from . import paseo, remote
 from .render import Rendered, expand, render
 from .secrets import Resolver
 from .state import Fleet, Host, state_dir
@@ -26,10 +30,9 @@ COMPONENTS = {
     "ssh": "Fleet SSH key, ssh config include, pinned host keys",
     "github": "gh CLI, gh login, git identity",
     "toolchain": "uv + pnpm and their 7-day release cooldown",
-    "omp": "omp config layers, agents, rules, fleet AGENTS.md",
+    "omp-binary": "omp installed if missing; old npm copies removed",
     "netbird": "NetBird client joined with a setup key (new machines)",
-    "paseo": "Host is in the Paseo deploy inventory (build once, copy)",
-    "paseo-models": "Paseo agent providers and visible models (layered)",
+    "paseo-deploy": "Host in the Paseo deploy inventory (build once, copy)",
 }
 RUNS = Path("~/.config/flotilla/runs").expanduser()
 
@@ -64,10 +67,9 @@ def _component_data(component: str, r: Rendered, hdir: Path,
         path.write_text(key)
         path.chmod(0o600)
         return {"setup_key_file": str(path)}
-    if component == "omp":
-        return {"keep": r.data["keep"],
-                "remove_npm_global":
-                    (v.get("omp") or {}).get("remove_npm_global") or []}
+    if component == "omp-binary":
+        return {"remove_npm_global":
+                (v.get("omp") or {}).get("remove_npm_global") or []}
     return {}
 
 
@@ -111,8 +113,8 @@ def prepare(component: str, fleet: Fleet, hosts: list[Host],
 
 
 def pyinfra_argv(component: str, run_dir: Path, dry: bool) -> list[str]:
-    deploy = resources.files("flotilla").joinpath("deploys",
-                                                  f"{component}.py")
+    deploy = resources.files("flotilla").joinpath(
+        "deploys", f"{component.replace('-', '_')}.py")
     argv = [sys.executable, "-m", "pyinfra", str(run_dir / "inventory.py"),
             str(deploy)]
     # `-y` with `--dry` makes pyinfra skip change detection.
@@ -130,8 +132,8 @@ def file_diffs(component: str, fleet: Fleet, host: Host,
 
     Secret values are replaced by their references in the output.
     """
-    if component == "paseo-models":
-        return paseo_models.diffs(fleet, host, resolver)
+    if component != "ssh":
+        return []
     r = render(component, fleet, host, resolver)
     if not r.files:
         return []
@@ -223,11 +225,8 @@ def execute(component: str, fleet: Fleet, hosts: list[Host], dry: bool,
     The last two items are ``("plan", {host: [ops]})`` (dry runs only)
     and ``("exit", code)``; every other item is a log line string.
     """
-    if component == "paseo":
+    if component == "paseo-deploy":
         yield from paseo.execute(fleet, hosts, dry)
-        return
-    if component == "paseo-models":
-        yield from paseo_models.execute(fleet, hosts, dry, resolver)
         return
     resolver = resolver or Resolver()
     lines: queue.Queue = queue.Queue()
