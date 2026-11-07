@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -19,14 +21,29 @@ def is_controller(fleet: Fleet, host: Host) -> bool:
 
 
 def write_controller_ssh_config(fleet: Fleet) -> Path:
-    """SSH config the controller uses: fleet hosts + pinned keys only."""
+    """SSH config the controller uses: fleet hosts + pinned keys only.
+
+    Hosts are reached from parallel threads, each of which calls this. A
+    plain rewrite truncates the file while another thread's ssh may be
+    reading it; ssh then runs with no config, falls back to ~/.ssh/known_hosts
+    and fails with "Host key verification failed". So write only when the
+    content changed, and replace the file atomically.
+    """
     body = ssh_config(fleet).replace(
         "UserKnownHostsFile ~/.ssh/known_hosts ~/.ssh/known_hosts.flotilla",
         f"UserKnownHostsFile {state_dir() / 'known_hosts'}\n"
         "  StrictHostKeyChecking yes\n  BatchMode yes\n"
         "  ConnectTimeout 8")
+    try:
+        if CONTROLLER_SSH.read_text() == body:
+            return CONTROLLER_SSH
+    except FileNotFoundError:
+        pass
     CONTROLLER_SSH.parent.mkdir(parents=True, exist_ok=True)
-    CONTROLLER_SSH.write_text(body)
+    tmp = CONTROLLER_SSH.with_name(
+        f"{CONTROLLER_SSH.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(body)
+    os.replace(tmp, CONTROLLER_SSH)
     return CONTROLLER_SSH
 
 
