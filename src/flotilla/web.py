@@ -1,10 +1,10 @@
 """FastAPI app: host map, quick exec, components, and the Config page.
 
-Config page: Flotilla's settings and every bundle (base plus group and host
-overrides), the file each host ends up with and where each key comes from,
-diffs against the hosts, plan and apply. A background thread re-plans every
-bundle after each change and every 30 minutes, so the page can show which
-hosts are out of date.
+Config page: the state directory as it is on disk, in a file tree and a code
+editor. A bundle's overview lists its files and the layers that override
+them; a group or host file compares with base; Apply shows what would change
+on every host, then applies. A background thread re-plans every bundle after
+each change and every 30 minutes, so the tree can show what is not applied.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import secrets as pysecrets
+import shutil
 import subprocess
 import threading
 import time
@@ -331,135 +332,45 @@ def _start_planner() -> None:
 # ---------------------------------------------------------------- bundles
 
 def _bundle_info(b: bundles.Bundle) -> dict[str, Any]:
-    return {"name": b.name, "description": b.description, "dest": b.dest,
-            "unit": b.unit, "deployable": b.deployable,
-            "owned": b.owned, "after_apply": b.after_apply,
+    return {"name": b.name, "prefix": b.prefix, "description": b.description,
+            "dest": b.dest, "unit": b.unit, "deployable": b.deployable,
             "plan": planner.plans.get(b.name)}
 
 
 @app.get("/api/bundles")
 def bundle_list() -> list[dict[str, Any]]:
+    """Every bundle, with its latest background plan (who differs)."""
     return [_bundle_info(b) for b in
-            [bundles.settings_bundle(), *bundles.load_bundles().values()]]
+            [*bundles.load_bundles().values(), bundles.settings_bundle()]]
 
 
-@app.get("/api/bundles/{name}")
-def bundle_detail(name: str) -> dict[str, Any]:
-    """Layers, files and, per host, where each file or item comes from."""
+@app.get("/api/bundles/{name}/overview")
+def bundle_overview(name: str) -> dict[str, Any]:
+    """Every file (or item) of the bundle and the layers that have it."""
     b = _bundle(name)
-    fleet = load_fleet()
-    layer_ids = b.existing_layers()
-    state_files: dict[str, list[str]] = {}
-    skips: dict[str, dict[str, str]] = {}
-    for lid in layer_ids:
-        d = b.layer_dir(lid)
-        for rel in bundles.layer_files(d):
-            state_files.setdefault(rel, []).append(lid)
-        man = bundles.layer_manifest(d)
-        for kind in ("skip", "delete"):
-            for item in man[kind]:
-                skips.setdefault(item, {})[lid] = kind
-    hosts: dict[str, Any] = {}
-    for h in fleet.managed():
-        try:
-            comp = bundles.compile_bundle(b, h, fleet)
-        except (bundles.BundleError, ValueError) as exc:
-            hosts[h.name] = {"error": str(exc)}
-            continue
-        hosts[h.name] = {"items": comp.items, "skipped": comp.skipped,
-                         "delete": comp.delete,
-                         "files": {r: f.sources for r, f in comp.files.items()}}
-    files = [{"rel": rel, "out": bundles.out_name(rel), "layers": lids,
-              "merge": b.rule(bundles.out_name(rel)).merge}
-             for rel, lids in sorted(state_files.items())]
-    return {**_bundle_info(b), "layers": layer_ids, "files": files,
-            "marks": skips, "hosts": hosts,
-            "groups": fleet.groups(),
-            "host_names": [h.name for h in fleet.managed()],
-            "readme": (b.root / "README.md").read_text()
-            if (b.root / "README.md").is_file() else ""}
+    try:
+        rows = bundles.layout(b)
+    except bundles.BundleError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {**_bundle_info(b), "rows": rows}
 
 
-@app.get("/api/bundles/{name}/compiled")
-def bundle_compiled(name: str, host: str, file: str) -> dict[str, Any]:
-    b = _bundle(name)
-    fleet = load_fleet()
-    comp = bundles.compile_bundle(b, fleet.host(host), fleet)
-    f = comp.files.get(file)
-    if f is None:
-        raise HTTPException(404, f"{host} gets no {file} from {name}")
-    text = (f.text if isinstance(f.text, str)
-            else f"(binary file, {len(f.text)} bytes)")
-    return {"file": file, "text": text, "sources": f.sources,
-            "explain": f.explain, "own_keys": f.own_keys, "secret": f.secret}
-
-
-@app.get("/api/bundles/{name}/diff")
-def bundle_diff(name: str, host: str) -> dict[str, Any]:
+@app.post("/api/bundles/{name}/review")
+def bundle_review(name: str) -> dict[str, Any]:
+    """What applying would change on every managed host, with diffs."""
     b = _bundle(name)
     if not b.deployable:
-        return {"diffs": [], "note": "not copied to hosts"}
+        raise HTTPException(400, f"{name} is not copied to hosts")
     fleet = load_fleet()
-    return {"diffs": bundles.diffs(b, fleet, fleet.host(host),
-                                   secrets.Resolver())}
+    result = bundles.review_all(b, fleet, fleet.managed())
+    planner.record(name, {"plan": {h: r["ops"] for h, r in
+                                   result["hosts"].items()},
+                          "errors": result["errors"]})
+    return result
 
 
-def _saved(message: str) -> None:
-    commit(message)
-    planner.soon()
-
-
-@app.post("/api/bundles/{name}/override")
-async def bundle_override(name: str, request: Request) -> dict[str, Any]:
-    """Set (or clear) one key for a group or host."""
-    body = await request.json()
-    b = _bundle(name)
-    layer, rel, key = body["layer"], body["file"], body["key"]
-    try:
-        path = b.layer_dir(layer) / rel
-        if body.get("clear"):
-            def change():
-                if not bundles.clear_override(b, layer, rel, key):
-                    raise HTTPException(400, f"{key} is not set in {layer}")
-            message = f"{name}: clear {key} for {layer}"
-        else:
-            value = yaml.safe_load(body.get("value", ""))
-            if secrets.literal_secrets({key: value}):
-                raise HTTPException(422, "store the secret in the vault and "
-                                    "use its aside:// reference")
-            op = body.get("op", "")
-
-            def change():
-                bundles.set_override(b, layer, rel, key, value, op)
-            message = f"{name}: {key}{op} for {layer}"
-        problems = bundles.guarded_edit(b, load_fleet(), path, change)
-    except (bundles.BundleError, yaml.YAMLError) as exc:
-        raise HTTPException(400, str(exc)) from exc
-    if problems:
-        return JSONResponse({"ok": False, "problems": problems},
-                            status_code=422)
-    _saved(message)
-    return {"ok": True}
-
-
-@app.post("/api/bundles/{name}/item")
-async def bundle_item(name: str, request: Request) -> dict[str, Any]:
-    """Skip, delete or place one item (for example a skill) in a layer."""
-    body = await request.json()
-    b = _bundle(name)
-    kind = body.get("state") or None
-    try:
-        bundles.set_item_state(b, body["layer"], body["item"], kind)
-    except bundles.BundleError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    _saved(f"{name}: {kind or 'place'} {body['item']} on {body['layer']}")
-    return {"ok": True}
-
-
-@app.post("/api/bundles/{name}/{action}")
-async def bundle_run(name: str, action: str, request: Request):
-    if action not in ("plan", "apply"):
-        raise HTTPException(404)
+@app.post("/api/bundles/{name}/apply")
+async def bundle_apply(name: str, request: Request):
     b = _bundle(name)
     if not b.deployable:
         raise HTTPException(400, f"{name} is not copied to hosts")
@@ -468,16 +379,11 @@ async def bundle_run(name: str, action: str, request: Request):
     fleet = load_fleet()
 
     def work(emit):
-        for item in bundles.execute(b, fleet, hosts, dry=action == "plan"):
-            if isinstance(item, tuple) and item[0] == "plan" and \
-                    len(hosts) == len(fleet.managed()):
-                planner.record(name, item[1])
-            yield item
-        if action == "apply":
-            planner.soon()
+        yield from bundles.execute(b, fleet, hosts, dry=False)
+        planner.soon()
 
     names = ", ".join(h.name for h in hosts)
-    return _job(jobs.start(f"{action} {name} on {names}", work))
+    return _job(jobs.start(f"apply {name} on {names}", work))
 
 
 # ---------------------------------------------------------------- state files
@@ -485,27 +391,50 @@ async def bundle_run(name: str, action: str, request: Request):
 def _state_path(rel: str) -> Path:
     root = state_dir().resolve()
     path = (root / rel).resolve()
-    if root not in path.parents and path != root:
-        raise HTTPException(400, "path outside the state directory")
+    if root not in path.parents or \
+            any(part.startswith(".") for part in path.relative_to(root).parts):
+        raise HTTPException(400, f"not an editable path: {rel}")
     return path
 
 
-def _owner(rel: str) -> bundles.Bundle | None:
-    """The bundle (or settings) a state file belongs to."""
-    parts = rel.split("/")
-    if parts[0] == bundles.SETTINGS:
-        return bundles.settings_bundle()
-    if parts[0] == "bundles" and len(parts) > 2:
-        return bundles.get_bundle(parts[1])
-    return None
+@app.get("/api/state/tree")
+def state_tree() -> list[str]:
+    """Every editable file in the state directory, as stored on disk."""
+    root = state_dir()
+    out = []
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if not x.startswith(".")]
+        for f in files:
+            rel = (Path(d) / f).relative_to(root).as_posix()
+            if not f.startswith(".") and rel != "known_hosts":
+                out.append(rel)
+    return sorted(out)
+
+
+def _meta(rel: str) -> dict[str, Any] | None:
+    """Where a state path sits: its bundle, layer and path in the layer."""
+    try:
+        found = bundles.bundle_of(rel)
+    except bundles.BundleError:
+        return None
+    if found is None:
+        return None
+    b, layer, inner = found
+    return {"bundle": b.name, "prefix": b.prefix, "unit": b.unit,
+            "deployable": b.deployable, "layer": layer, "rel": inner,
+            "merge": b.rule(bundles.out_name(inner)).merge if inner else None}
 
 
 @app.get("/api/state/file")
 def state_read(path: str) -> dict[str, Any]:
     p = _state_path(path)
+    out = {"path": path, "meta": _meta(path)}
     if not p.is_file():
-        return {"path": path, "content": "", "new": True}
-    return {"path": path, "content": p.read_text()}
+        return {**out, "content": "", "new": True}
+    try:
+        return {**out, "content": p.read_text()}
+    except UnicodeDecodeError:
+        return {**out, "content": "", "binary": True}
 
 
 def _validate(path: str, content: str) -> list[str]:
@@ -543,21 +472,25 @@ def _unknown_models(content: str) -> list[str]:
     return sorted(found)
 
 
+def _saved(message: str) -> None:
+    commit(message)
+    planner.soon()
+
+
 @app.put("/api/state/file")
 async def state_write(request: Request) -> dict[str, Any]:
+    """Create or replace a file; refused if the state would break."""
     body = await request.json()
     path, content = body["path"], body["content"]
-    problems = _validate(path, content)
     p = _state_path(path)
-    owner = _owner(path) if not problems else None
-    if owner is not None:
+    if p.is_dir():
+        raise HTTPException(400, f"{path} is a folder")
+    problems = _validate(path, content)
+    if not problems:
         def change():
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
-        problems = bundles.guarded_edit(owner, load_fleet(), p, change)
-    elif not problems:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+        problems = bundles.guarded_edit(p, change)
     if problems:
         return JSONResponse({"ok": False, "problems": problems},
                             status_code=422)
@@ -568,19 +501,43 @@ async def state_write(request: Request) -> dict[str, Any]:
 
 @app.delete("/api/state/file")
 def state_delete(path: str) -> dict[str, Any]:
+    """Delete a file or a folder; refused if the state would break."""
     p = _state_path(path)
-    if p.is_file():
-        p.unlink()
-        _saved(f"delete {path}")
+    if not p.exists():
+        return {"ok": True}
+    if p.is_dir() and p.parent == state_dir().resolve():
+        raise HTTPException(400, f"{path} cannot be deleted")
+
+    def change():
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+    problems = bundles.guarded_edit(p, change)
+    if problems:
+        return JSONResponse({"ok": False, "problems": problems},
+                            status_code=422)
+    bundles.prune_empty(p.parent, state_dir())
+    _saved(f"delete {path}")
     return {"ok": True}
 
 
-@app.get("/api/state/history")
-def state_history() -> list[str]:
-    out = subprocess.run(["git", "-C", str(state_dir()), "log",
-                          "--format=%h %ad %s", "--date=short", "-n", "50"],
-                         capture_output=True, text=True)
-    return out.stdout.splitlines()
+@app.post("/api/state/compare")
+async def state_compare(request: Request) -> dict[str, Any]:
+    """A layer file against base; ``content`` stands in for unsaved edits."""
+    body = await request.json()
+    path = body["path"]
+    _state_path(path)
+    meta = _meta(path)
+    if not meta or not meta["rel"] or meta["layer"] in (None, "base"):
+        raise HTTPException(400, "only group and host files compare with "
+                            "base")
+    b = bundles.get_bundle(meta["bundle"])
+    try:
+        return bundles.compare(b, meta["rel"], meta["layer"], load_fleet(),
+                               body.get("content"))
+    except bundles.BundleError as exc:
+        return {"diff": "", "note": str(exc)}
 
 
 @app.get("/api/catalog/models")

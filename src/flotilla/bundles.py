@@ -46,6 +46,8 @@ import fnmatch
 import hashlib
 import json
 import shlex
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,7 +58,7 @@ import yaml
 
 from . import layers, remote
 from .secrets import REF_IN_TEXT, Resolver
-from .state import Fleet, Host, dump_file, state_dir
+from .state import Fleet, Host, dump_file, load_fleet, state_dir
 
 BUNDLE_FILE = "bundle.yaml"
 LAYER_FILE = "_layer.yml"
@@ -104,12 +106,25 @@ class Bundle:
                 f"host:{host.name}"]
 
     def layer_dir(self, layer_id: str) -> Path:
+        return self.root / self.layer_rel(layer_id)
+
+    def layer_rel(self, layer_id: str) -> str:
+        """``base``, ``groups/<group>`` or ``hosts/<host>``."""
         if layer_id == "base":
-            return self.root / "base"
+            return "base"
         kind, _, name = layer_id.partition(":")
         if kind not in ("group", "host") or not name or "/" in name:
             raise BundleError(f"bad layer {layer_id!r}")
-        return self.root / f"{kind}s" / name
+        return f"{kind}s/{name}"
+
+    @property
+    def prefix(self) -> str:
+        """The bundle's folder in the state directory."""
+        return SETTINGS if self.name == SETTINGS else f"bundles/{self.name}"
+
+    def state_path(self, layer_id: str, rel: str) -> str:
+        """A layer file's path in the state directory."""
+        return f"{self.prefix}/{self.layer_rel(layer_id)}/{rel}"
 
     def existing_layers(self) -> list[str]:
         out = ["base"] if (self.root / "base").is_dir() else []
@@ -122,14 +137,22 @@ class Bundle:
 
 
 def _load(name: str, root: Path) -> Bundle:
-    spec = yaml.safe_load((root / BUNDLE_FILE).read_text()) or {}
+    where = f"{name}/{BUNDLE_FILE}"
+    try:
+        spec = yaml.safe_load((root / BUNDLE_FILE).read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise BundleError(f"{where}: {exc}") from exc
+    if not isinstance(spec, dict):
+        raise BundleError(f"{where} must be a map")
     unit = spec.get("unit", "file")
     if unit not in ("file", "directory"):
-        raise BundleError(f"{name}: unit must be file or directory")
+        raise BundleError(f"{where}: unit must be file or directory")
     rules = []
     for r in spec.get("files") or []:
+        if not isinstance(r, dict) or not isinstance(r.get("match"), str):
+            raise BundleError(f"{where}: every files entry needs a match")
         if r.get("merge", "whole") not in ("keys", "whole"):
-            raise BundleError(f"{name}: merge must be keys or whole")
+            raise BundleError(f"{where}: merge must be keys or whole")
         rules.append(Rule(match=r["match"], merge=r.get("merge", "whole"),
                           own_keys=list(r.get("own_keys") or [])))
     return Bundle(name=name, root=root, description=spec.get("description", ""),
@@ -158,10 +181,40 @@ def settings_bundle(root: Path | None = None) -> Bundle:
 def get_bundle(name: str, root: Path | None = None) -> Bundle:
     if name == SETTINGS:
         return settings_bundle(root)
-    found = load_bundles(root).get(name)
-    if not found:
+    path = (root or state_dir()) / "bundles" / name
+    if "/" in name or not (path / BUNDLE_FILE).is_file():
         raise BundleError(f"unknown bundle: {name}")
-    return found
+    return _load(name, path)
+
+
+def bundle_of(rel: str, root: Path | None = None
+              ) -> tuple[Bundle, str | None, str | None] | None:
+    """The bundle a state path belongs to, its layer and the path in it.
+
+    ``bundles/omp/groups/work/config.yml`` -> (omp, "group:work",
+    "config.yml"). Files outside a layer (``bundle.yaml``) have no layer.
+    None for paths outside every bundle (``hosts.yaml``).
+    """
+    parts = rel.split("/")
+    if parts[0] == SETTINGS:
+        bundle, rest = settings_bundle(root), parts[1:]
+    elif parts[0] == "bundles" and len(parts) > 2:
+        try:
+            bundle = get_bundle(parts[1], root)
+        except BundleError:
+            return None
+        rest = parts[2:]
+    else:
+        return None
+    if len(rest) > 1 and rest[0] == "base":
+        layer, inner = "base", rest[1:]
+    elif len(rest) > 2 and rest[0] in ("groups", "hosts"):
+        layer, inner = f"{rest[0][:-1]}:{rest[1]}", rest[2:]
+    else:
+        return bundle, None, None
+    if inner == [LAYER_FILE]:
+        return bundle, layer, None
+    return bundle, layer, "/".join(inner)
 
 
 # ---------------------------------------------------------------- files
@@ -192,33 +245,69 @@ def dump(out_rel: str, data: Any) -> str:
     return dump_file(out_rel, data)
 
 
-def layer_files(d: Path) -> dict[str, str | bytes]:
-    """``{relative path: text}`` in one layer folder (bytes if binary).
+def layer_names(d: Path) -> list[str]:
+    """Relative paths of the files in one layer folder.
 
-    Dotfiles and ``__pycache__`` folders are not part of a layer.
+    Dotfiles, ``__pycache__`` folders and ``_layer.yml`` are not part of it.
     """
     if not d.is_dir():
-        return {}
-    out: dict[str, str | bytes] = {}
+        return []
+    out = []
     for p in sorted(d.rglob("*")):
         rel = p.relative_to(d).as_posix()
         parts = rel.split("/")
         if p.is_file() and rel != LAYER_FILE and "__pycache__" not in parts \
                 and not any(part.startswith(".") for part in parts):
-            raw = p.read_bytes()
-            try:
-                out[rel] = raw.decode()
-            except UnicodeDecodeError:
-                out[rel] = raw
+            out.append(rel)
+    return out
+
+
+def layer_files(d: Path) -> dict[str, str | bytes]:
+    """``{relative path: text}`` in one layer folder (bytes if binary)."""
+    out: dict[str, str | bytes] = {}
+    for rel in layer_names(d):
+        raw = (d / rel).read_bytes()
+        try:
+            out[rel] = raw.decode()
+        except UnicodeDecodeError:
+            out[rel] = raw
     return out
 
 
 def layer_manifest(d: Path) -> dict[str, list[str]]:
+    """The ``skip`` and ``delete`` lists of a layer's ``_layer.yml``."""
     path = d / LAYER_FILE
-    data = yaml.safe_load(path.read_text()) if path.is_file() else None
+    where = f"{d.name}/{LAYER_FILE}"
+    try:
+        data = yaml.safe_load(path.read_text()) if path.is_file() else None
+    except yaml.YAMLError as exc:
+        raise BundleError(f"{where}: {exc}") from exc
     data = data or {}
-    return {"skip": list(data.get("skip") or []),
-            "delete": list(data.get("delete") or [])}
+    if not isinstance(data, dict):
+        raise BundleError(f"{where} must be a map with skip and delete lists")
+    out = {}
+    for kind in ("skip", "delete"):
+        items = data.get(kind) or []
+        if not isinstance(items, list) or \
+                not all(isinstance(i, str) for i in items):
+            raise BundleError(f"{where}: {kind} must be a list of names")
+        out[kind] = items
+    return out
+
+
+def merge_versions(rel: str, versions: list[tuple[str, str]],
+                   prov: dict[layers.Path, list[str]] | None = None) -> Any:
+    """Merge the texts of one keys-merged state file, lowest layer first."""
+    prov = prov if prov is not None else {}
+    first_layer, first_text = versions[0]
+    data = parse(rel, first_text)
+    if layers.has_ops(data):
+        data = layers.apply({}, data, first_layer, prov)
+    else:
+        layers.leaves(data, first_layer, prov)
+    for layer_id, text in versions[1:]:
+        data = layers.apply(data, parse(rel, text), layer_id, prov)
+    return data
 
 
 # ---------------------------------------------------------------- compile
@@ -312,17 +401,14 @@ def _compile_file(bundle: Bundle, rel: str, vs: list[tuple[str, str]],
     try:
         prov: dict[layers.Path, list[str]] = {}
         first_layer, first_text = vs[0]
-        data = parse(rel, first_text)
-        if len(vs) == 1 and target == rel and not layers.has_ops(data):
-            layers.leaves(data, first_layer, prov)
-            return OutFile(target, first_text, [first_layer], data,
-                           layers.explain(data, prov), rule.own_keys)
-        if layers.has_ops(data):
-            data = layers.apply({}, data, first_layer, prov)
-        else:
-            layers.leaves(data, first_layer, prov)
-        for layer_id, text in vs[1:]:
-            data = layers.apply(data, parse(rel, text), layer_id, prov)
+        if len(vs) == 1 and target == rel:
+            data = parse(rel, first_text)
+            if not layers.has_ops(data):
+                # One layer, plain file: written exactly as it is.
+                layers.leaves(data, first_layer, prov)
+                return OutFile(target, first_text, [first_layer], data,
+                               layers.explain(data, prov), rule.own_keys)
+        data = merge_versions(rel, vs, prov)
     except layers.LayerError as exc:
         raise BundleError(f"{bundle.name}/{rel}: {exc}") from exc
     return OutFile(target, dump(target, data), [lid for lid, _ in vs], data,
@@ -355,26 +441,176 @@ def check(bundle: Bundle, fleet: Fleet) -> list[str]:
     for host in fleet.managed():
         try:
             compile_bundle(bundle, host, fleet)
-        except (BundleError, layers.LayerError) as exc:
+        except Exception as exc:  # noqa: BLE001 - any failure is a problem
             msg = f"{host.name}: {exc}"
             if msg not in problems:
                 problems.append(msg)
     return problems
 
 
-def guarded_edit(bundle: Bundle, fleet: Fleet, path: Path,
-                 change: Any) -> list[str]:
-    """Run ``change()`` (which edits ``path``); undo it if the bundle no
-    longer compiles for every host. Returns the problems (empty: kept)."""
-    old = path.read_text() if path.is_file() else None
-    change()
-    problems = check(bundle, fleet)
-    if problems:
-        if old is None:
-            path.unlink(missing_ok=True)
+def state_problems(rel: str, root: Path | None = None) -> list[str]:
+    """What is broken in the state after a change to the path ``rel``.
+
+    ``hosts.yaml`` must load; the bundle the path belongs to must compile
+    for every managed host (every bundle, after a change to ``hosts.yaml``).
+    """
+    try:
+        fleet = load_fleet(root)
+    except Exception as exc:  # noqa: BLE001 - reported to the editor
+        return [f"hosts.yaml: {exc}"]
+    parts = rel.split("/")
+    try:
+        if rel == "hosts.yaml":
+            todo = [settings_bundle(root), *load_bundles(root).values()]
+        elif parts[0] == SETTINGS:
+            todo = [settings_bundle(root)]
+        elif parts[0] == "bundles" and len(parts) > 1 and \
+                ((root or state_dir()) / "bundles" / parts[1] /
+                 BUNDLE_FILE).is_file():
+            todo = [get_bundle(parts[1], root)]
         else:
-            path.write_text(old)
+            return []
+    except BundleError as exc:
+        return [str(exc)]
+    return [p for b in todo for p in check(b, fleet)]
+
+
+def guarded_edit(path: Path, change: Any, root: Path | None = None
+                 ) -> list[str]:
+    """Run ``change()``, which creates, edits or deletes the state file or
+    folder ``path``; undo it if the state is broken afterwards (see
+    :func:`state_problems`). Returns the problems (empty: the change stays).
+    """
+    root = (root or state_dir()).resolve()
+    path = path.resolve()
+    rel = path.relative_to(root).as_posix()
+    with tempfile.TemporaryDirectory() as tmp:
+        backup = Path(tmp) / "old"
+        if path.is_dir():
+            shutil.copytree(path, backup, symlinks=True)
+        elif path.is_file():
+            shutil.copy2(path, backup)
+        change()
+        problems = state_problems(rel, root)
+        if problems:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+            if backup.is_dir():
+                shutil.copytree(backup, path, symlinks=True)
+            elif backup.is_file():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, path)
+            else:
+                prune_empty(path.parent, root)
     return problems
+
+
+def prune_empty(d: Path, root: Path) -> None:
+    """Remove ``d`` and its parents up to ``root`` while they are empty."""
+    root = root.resolve()
+    d = d.resolve()
+    while d != root and root in d.parents and d.is_dir() and \
+            not any(d.iterdir()):
+        d.rmdir()
+        d = d.parent
+
+
+# ---------------------------------------------------------------- views
+
+def layout(bundle: Bundle) -> list[dict[str, Any]]:
+    """Rows of the bundle overview: every file (every item, for directory
+    bundles) with the layers that have it, the state path to open for each
+    layer, and the layers whose ``_layer.yml`` skips or deletes it."""
+    rows: dict[str, dict[str, Any]] = {}
+
+    def row(name: str) -> dict[str, Any]:
+        merge = "whole" if bundle.unit == "directory" or name.endswith(".j2") \
+            else bundle.rule(out_name(name)).merge
+        return rows.setdefault(name, {"name": name, "layers": [], "open": {},
+                                      "marks": {}, "merge": merge})
+
+    for lid in bundle.existing_layers():
+        d = bundle.layer_dir(lid)
+        for rel in layer_names(d):
+            r = row(_item(bundle, rel))
+            if lid not in r["layers"]:
+                r["layers"].append(lid)
+                r["open"][lid] = bundle.state_path(lid, rel)
+            if rel.endswith("/SKILL.md"):   # open a skill at its SKILL.md
+                r["open"][lid] = bundle.state_path(lid, rel)
+        for kind, items in layer_manifest(d).items():
+            for name in items:
+                row(name)["marks"][lid] = kind
+    return sorted(rows.values(), key=lambda r: r["name"])
+
+
+def _read_text(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text()
+    except UnicodeDecodeError:
+        raise BundleError(f"{path.name} is not a text file") from None
+
+
+def compare(bundle: Bundle, rel: str, layer_id: str, fleet: Fleet,
+            content: str | None = None) -> dict[str, Any]:
+    """What a layer's copy of the state file ``rel`` changes from base.
+
+    ``content`` stands in for the layer's file (unsaved edits). Files merged
+    by key are compared after merging, written the same way on both sides
+    so only real changes show: a group's file on top of base, a host's file
+    as that host gets it (base, its groups, the host). Other files are
+    compared as they are; templates unrendered.
+    """
+    def text(lid: str) -> str | None:
+        if lid == layer_id and content is not None:
+            return content
+        return _read_text(bundle.layer_dir(lid) / rel)
+
+    base = text("base")
+    to_label = f"{bundle.layer_rel(layer_id)}/{rel}"
+    notes = []
+    if base is None:
+        notes.append(f"base has no {rel}: every line is added.")
+    keys = bundle.unit == "file" and not rel.endswith(".j2") and \
+        bundle.rule(out_name(rel)).merge == "keys"
+    if keys:
+        ids = ["base", layer_id]
+        if layer_id.startswith("host:"):
+            name = layer_id.split(":", 1)[1]
+            if name in fleet.hosts:
+                ids = bundle.layer_ids(fleet.host(name))
+            else:
+                notes.append(f"{name} is not in hosts.yaml.")
+        versions = [(lid, t) for lid in ids if (t := text(lid)) is not None]
+        between = [lid for lid, _ in versions if lid not in ("base", layer_id)]
+        if between:   # a host that also gets a group's file
+            to_label = f"what {layer_id.split(':', 1)[1]} gets (base + " + \
+                " + ".join(lid.split(":", 1)[1] for lid in between) + \
+                f" + {layer_id.split(':', 1)[1]})"
+        try:
+            old = dump(rel, merge_versions(rel, [("base", base)])) \
+                if base is not None else ""
+            new = dump(rel, merge_versions(rel, versions)) if versions else ""
+        except layers.LayerError as exc:
+            raise BundleError(f"{rel}: {exc}") from exc
+    else:
+        old, new = base or "", text(layer_id) or ""
+        if bundle.unit == "directory":
+            item = rel.split("/", 1)[0]
+            mine = set(layer_names(bundle.layer_dir(layer_id) / item))
+            gone = [n for n in layer_names(bundle.layer_dir("base") / item)
+                    if n not in mine]
+            if gone:
+                notes.append(f"This copy of {item} replaces the whole "
+                             f"folder; not in it: {', '.join(gone)}.")
+    diff = "".join(difflib.unified_diff(
+        old.splitlines(True), new.splitlines(True),
+        fromfile=f"base/{rel}", tofile=to_label))
+    return {"diff": diff, "note": " ".join(notes)}
 
 
 # ---------------------------------------------------------------- hosts
@@ -598,15 +834,16 @@ def apply_host(bundle: Bundle, fleet: Fleet, host: Host,
     return code, lines
 
 
-def diffs(bundle: Bundle, fleet: Fleet, host: Host,
-          resolver: Resolver) -> list[dict[str, Any]]:
-    """Unified diffs between the host and the compiled bundle (masked)."""
+def review(bundle: Bundle, fleet: Fleet, host: Host,
+           resolver: Resolver) -> dict[str, Any]:
+    """What applying would do on ``host``: the operations and a unified
+    diff per changed file, secrets masked."""
     from .runner import mask
 
     comp = compile_bundle(bundle, host, fleet)
     plan = plan_host(bundle, fleet, host, resolver, comp)
     if not plan.ops:
-        return []
+        return {"ops": [], "diffs": []}
     plain = [r for r in plan.changed if not comp.files[r].own_keys]
     seen = inspect(bundle, fleet, host, comp, content=plain)
     out = []
@@ -636,6 +873,32 @@ def diffs(bundle: Bundle, fleet: Fleet, host: Host,
         out.append({"path": rel, "diff": mask(resolver.redact(text))})
     for rel in plan.delete:
         out.append({"path": rel, "diff": f"delete {rel}\n"})
+    return {"ops": summarize(bundle, plan.ops), "diffs": out}
+
+
+def review_all(bundle: Bundle, fleet: Fleet, hosts: list[Host],
+               resolver: Resolver | None = None) -> dict[str, Any]:
+    """:func:`review` for every host in parallel.
+
+    ``{"hosts": {name: review}, "in_sync": [names], "errors": {name: msg}}``
+    """
+    resolver = resolver or Resolver()
+
+    def one(host: Host) -> tuple[str, dict[str, Any] | None, str | None]:
+        try:
+            return host.name, review(bundle, fleet, host, resolver), None
+        except Exception as exc:  # noqa: BLE001 - reported per host
+            return host.name, None, str(exc)
+
+    out: dict[str, Any] = {"hosts": {}, "in_sync": [], "errors": {}}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for name, result, err in pool.map(one, hosts):
+            if err is not None:
+                out["errors"][name] = err
+            elif result["ops"]:
+                out["hosts"][name] = result
+            else:
+                out["in_sync"].append(name)
     return out
 
 

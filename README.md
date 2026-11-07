@@ -3,7 +3,7 @@
 Manage a small fleet of machines on a NetBird network from one place: SSH between every host, GitHub access, toolchains, and config files (omp config, skills, Paseo settings) kept as a base plus small per-group and per-host overrides. Changes are planned first (dry run with diffs) and then applied over SSH. Nothing is installed on the managed machines.
 
 - **Hosts**: live status of every machine (versions, GitHub login, NetBird, disk, load) and a click-to-run command drawer.
-- **Config**: every bundle of config files. For each file: which layers have it, what each host ends up with and which layer set each key, the diff against a host, and an editor per layer. Override one key for a group or host without opening a file; skip or delete a skill per host or group. Plan and apply from the same page.
+- **Config**: the state directory exactly as it is on the controller, in a file tree and a code editor: create, edit and delete any file (a save that would break a bundle or `hosts.yaml` is refused). A bundle's overview lists its files with a label for every group or host that overrides one; click a name for base, a label for that override. A group or host file has **Diff vs base**: what it removes and adds, unsaved edits included (merged files are compared after merging; a host file as that host gets it). **Apply…** shows the diff for every host, then applies.
 - **Components**: plan or apply the installers per host or group: `ssh`, `github`, `toolchain`, `omp-binary`, `netbird`, `paseo-deploy`.
 
 Agents use it through the CLI and the `flotilla` skill (in the `skills` bundle, so every host has it).
@@ -61,7 +61,7 @@ Bundles today: `omp` (`~/.omp/agent`: settings, models, account routing, agents,
 
 ### Sync
 
-Flotilla compiles each bundle per host on the controller, reads the host's files over SSH, and lists what would change (plan). Apply writes only those files, atomically, then runs `after_apply`. Nothing changes on a host until someone applies. After every change in the UI, and every 30 minutes, the web app re-plans every bundle in the background, so the Config page shows which hosts are out of date and which are offline.
+Flotilla compiles each bundle per host on the controller, reads the host's files over SSH, and lists what would change (plan). Apply writes only those files, atomically, then runs `after_apply`. Nothing changes on a host until someone applies. After every change, and every 30 minutes, the web app re-plans every bundle in the background; the file tree marks bundles that are not applied on every host.
 
 ### Hosts
 

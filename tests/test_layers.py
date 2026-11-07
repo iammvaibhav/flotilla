@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from flotilla import bundles, layers
-from flotilla.state import Fleet, Host
+from flotilla.state import Fleet, Host, load_fleet
 
 
 def test_override_keys_merge_add_remove_replace_delete():
@@ -153,3 +153,68 @@ def test_set_and_clear_override_keep_the_rest_of_the_file(tmp_path):
     assert not bundles.clear_override(b, "group:work", "c.yml", "l")
     assert bundles.clear_override(b, "group:work", "c.yml", "a.b")
     assert not path.exists()
+
+
+HOSTS_YAML = """\
+controller: one
+hosts:
+  one: {address: 10.0.0.1, user: u, platform: linux-x64, groups: [personal]}
+  two: {address: 10.0.0.2, user: u, platform: linux-x64, groups: [work]}
+"""
+
+
+def test_a_change_that_breaks_the_state_is_undone(tmp_path):
+    (tmp_path / "hosts.yaml").write_text(HOSTS_YAML)
+    b = _bundle(tmp_path, {"dest": "~/x", "files": [
+        {"match": "*.yml", "merge": "keys"}]}, {
+        "base/c.yml": "m: {a: 1}\n", "groups/work/c.yml": "x: 1\n"})
+    over = b.layer_dir("group:work") / "c.yml"
+    # `+` on a map does not compile for host two: the old file comes back.
+    problems = bundles.guarded_edit(
+        over, lambda: over.write_text("m+: [b]\n"), root=tmp_path)
+    assert problems and problems[0].startswith("two:")
+    assert over.read_text() == "x: 1\n"
+    # A new broken file is removed again, with the folders made for it.
+    new = b.layer_dir("host:two") / "c.yml"
+
+    def create():
+        new.parent.mkdir(parents=True)
+        new.write_text("m+: [b]\n")
+    assert bundles.guarded_edit(new, create, root=tmp_path)
+    assert not (tmp_path / "bundles/b/hosts").exists()
+    # A broken hosts.yaml is restored too; a good edit stays.
+    hosts = tmp_path / "hosts.yaml"
+    assert bundles.guarded_edit(
+        hosts, lambda: hosts.write_text("hosts: {one: {}}\n"), root=tmp_path)
+    assert hosts.read_text() == HOSTS_YAML
+    assert bundles.guarded_edit(
+        over, lambda: over.write_text("m.a: 2\n"), root=tmp_path) == []
+    assert over.read_text() == "m.a: 2\n"
+
+
+def test_compare_shows_what_a_layer_changes_from_base(tmp_path):
+    (tmp_path / "hosts.yaml").write_text(HOSTS_YAML)
+    b = _bundle(tmp_path, {"dest": "~/x", "files": [
+        {"match": "*.yml", "merge": "keys"}]}, {
+        "base/c.yml": "# base\na: {b: 1, c: 2}\nl: [x]\n",
+        "groups/work/c.yml": "a.b: 5\nl+: [y]\n",
+        "hosts/two/c.yml": "l-: [x]\n",
+        "base/notes.md": "one\ntwo\n",
+        "groups/work/notes.md": "one\nthree\n"})
+    fleet = load_fleet(tmp_path)
+
+    def changed(diff):
+        return [ln for ln in diff.splitlines()
+                if ln[:1] in "+-" and ln[:3] not in ("+++", "---")]
+
+    work = bundles.compare(b, "c.yml", "group:work", fleet)
+    assert changed(work["diff"]) == ["-  b: 1", "+  b: 5", "+  - y"]
+    # Unsaved edits are compared instead of the file.
+    draft = bundles.compare(b, "c.yml", "group:work", fleet, "a.c: 3\n")
+    assert changed(draft["diff"]) == ["-  c: 2", "+  c: 3"]
+    # A host's file is compared as the host gets it, its group included.
+    two = bundles.compare(b, "c.yml", "host:two", fleet)
+    assert "what two gets (base + work + two)" in two["diff"]
+    assert changed(two["diff"]) == ["-  b: 1", "+  b: 5", "-  - x", "+  - y"]
+    notes = bundles.compare(b, "notes.md", "group:work", fleet)
+    assert changed(notes["diff"]) == ["-two", "+three"]

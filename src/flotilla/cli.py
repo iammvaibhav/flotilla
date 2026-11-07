@@ -137,8 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         bundle = _target(a.target)
         resolver = Resolver()
         for h in _hosts(fleet, a.hosts):
-            found = (bundles.diffs(bundle, fleet, h, resolver) if bundle
-                     else runner.file_diffs(a.target, fleet, h, resolver))
+            found = (bundles.review(bundle, fleet, h, resolver)["diffs"]
+                     if bundle else
+                     runner.file_diffs(a.target, fleet, h, resolver))
             for d in found:
                 print(d["diff"])
         return 0
@@ -178,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                 bundles.set_override(bundle, layer, a.file, a.key,
                                      yaml.safe_load(a.value), a.op)
             message = f"{bundle.name}: {a.key}{a.op} for {layer}"
-        problems = bundles.guarded_edit(bundle, fleet, path, change)
+        problems = bundles.guarded_edit(path, change)
         if problems:
             raise SystemExit("not saved:\n" + "\n".join(problems))
         commit(message)
