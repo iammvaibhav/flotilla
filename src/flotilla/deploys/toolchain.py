@@ -1,8 +1,9 @@
-"""Toolchain: uv, pnpm (standalone), their release cooldowns, Node.js and agent-browser."""
+"""Toolchain: uv, pnpm (standalone), their release cooldowns, Node.js, agent-browser,
+Obscura and ffmpeg."""
 
 from pyinfra.operations import files
 
-from flotilla.deploys.common import bundle, fact, sh
+from flotilla.deploys.common import bundle, fact, fail, sh
 
 b = bundle()
 home = b["home"]
@@ -57,3 +58,27 @@ if ab and fact("~/.local/bin/agent-browser --version") != f"agent-browser {ab}":
        " > ~/.local/bin/agent-browser.new"
        " && chmod +x ~/.local/bin/agent-browser.new"
        " && mv ~/.local/bin/agent-browser.new ~/.local/bin/agent-browser")
+
+# Obscura: headless browser used as agent-browser's `--engine obscura` and for scripts.
+# The release's stealth build (TLS impersonation, tracker blocking), pinned. The tarball
+# holds `obscura` and `obscura-worker`; both go to ~/.local/bin.
+ob = tc.get("obscura")
+if ob and fact("~/.local/bin/obscura --version") != f"obscura {ob}":
+    os_name = "macos" if b["os"] == "darwin" else "linux"
+    sh(f"obscura {ob}",
+       "arch=$(uname -m | sed -e s/arm64/aarch64/); tmp=$(mktemp -d); "
+       "curl -fsSL https://github.com/h4ckf0r0day/obscura/releases/download/"
+       f"v{ob}/obscura-$arch-{os_name}-stealth.tar.gz | tar -xzC $tmp"
+       " && install -m 755 $tmp/obscura $tmp/obscura-worker ~/.local/bin/"
+       " && rm -rf $tmp")
+
+# ffmpeg: agent-browser's `record` encodes video with it.
+if tc.get("ffmpeg") and not fact("command -v ffmpeg"):
+    if b["os"] == "darwin":
+        sh("install ffmpeg", "brew install ffmpeg")
+    elif not fact("sudo -n true && echo yes"):
+        fail("ffmpeg needs sudo", "passwordless sudo is required to install ffmpeg")
+    else:
+        sh("install ffmpeg",
+           "sudo -n apt-get update -qq"
+           " && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg")
