@@ -1,4 +1,4 @@
-"""Toolchain: uv, pnpm (standalone) and their release cooldowns."""
+"""Toolchain: uv, pnpm (standalone), their release cooldowns, Node.js and agent-browser."""
 
 from pyinfra.operations import files
 
@@ -35,6 +35,25 @@ if fact(f"{pnpm_home}/bin/pnpm config get minimumReleaseAge") != age:
     sh("pnpm minimumReleaseAge",
        f"{pnpm_home}/bin/pnpm config set --global minimumReleaseAge {age}")
 
-if tc.get("node") and not fact("command -v node"):
+# Node only where there is none at all. Hosts with nvm keep their nvm node: nvm is not on
+# this shell's PATH, so look in ~/.nvm too, because a ~/.local/bin/node would shadow it.
+if tc.get("node") and not fact("command -v node || ls ~/.nvm/versions/node/*/bin/node"):
     sh(f"node {tc['node']} via pnpm",
-       f"{pnpm_home}/bin/pnpm runtime set node {tc['node']} -g")
+       f"export PNPM_HOME={pnpm_home} PATH={pnpm_home}/bin:$PATH;"
+       f" {pnpm_home}/bin/pnpm runtime set node {tc['node']} -g")
+    files.link(name="link node", path=f"{home}/.local/bin/node",
+               target=f"{pnpm_home}/bin/node")
+
+# agent-browser: the native binary from the npm tarball, pinned. Not the npm/pnpm package,
+# whose Node shim adds ~110 ms to every command; the fleet-browser skill relies on the
+# pinned version's behaviour.
+ab = tc.get("agent_browser")
+if ab and fact("~/.local/bin/agent-browser --version") != f"agent-browser {ab}":
+    os_name = "darwin" if b["os"] == "darwin" else "linux"
+    sh(f"agent-browser {ab}",
+       "arch=$(uname -m | sed -e s/x86_64/x64/ -e s/aarch64/arm64/); "
+       f"curl -fsSL https://registry.npmjs.org/agent-browser/-/agent-browser-{ab}.tgz"
+       f" | tar -xzO package/bin/agent-browser-{os_name}-$arch"
+       " > ~/.local/bin/agent-browser.new"
+       " && chmod +x ~/.local/bin/agent-browser.new"
+       " && mv ~/.local/bin/agent-browser.new ~/.local/bin/agent-browser")

@@ -85,7 +85,7 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 | Component | What it manages |
 |---|---|
 | `ssh` | Fleet key `~/.ssh/id_ed25519` (never overwrites a different key), `~/.ssh/config.d/flotilla.conf` with short names for every host, pinned host keys, an `Include` at the top of `~/.ssh/config`, and removal of retired keys (`ssh.remove_keyfiles`, `ssh.remove_pubkeys`). |
-| `toolchain` | uv and pnpm with release cooldowns (`exclude-newer`, `minimumReleaseAge`), links in `~/.local/bin`, optional Node through `pnpm runtime`. |
+| `toolchain` | uv and pnpm with release cooldowns (`exclude-newer`, `minimumReleaseAge`), links in `~/.local/bin`, Node through `pnpm runtime` on hosts with no node (nvm hosts keep theirs), and the pinned agent-browser native binary in `~/.local/bin`. |
 | `github` | `gh` (newest release older than 7 days), `gh` login from a vault token, git name and email per group. |
 | `omp-binary` | omp installed if missing; old npm-global copies removed (`omp.remove_npm_global`). |
 | `netbird` | Installs NetBird and joins with a setup key on machines that are not connected yet. Connected peers are not touched. |

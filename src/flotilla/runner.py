@@ -29,7 +29,7 @@ from .state import Fleet, Host, state_dir
 COMPONENTS = {
     "ssh": "Fleet SSH key, ssh config include, pinned host keys",
     "github": "gh CLI, gh login, git identity",
-    "toolchain": "uv + pnpm and their 7-day release cooldown",
+    "toolchain": "uv + pnpm (7-day cooldown), Node.js, agent-browser",
     "omp-binary": "omp installed if missing; old npm copies removed",
     "netbird": "NetBird client joined with a setup key (new machines)",
     "paseo-deploy": "Host in the Paseo deploy inventory (build once, copy)",
