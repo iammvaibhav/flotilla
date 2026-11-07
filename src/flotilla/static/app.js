@@ -261,7 +261,7 @@ function renderBundle() {
 function renderFiles(files, title = "") {
   const hosts = fleet.hosts.map((h) => h.name);
   $("#bbody").innerHTML = `${title}<table class="files" style="width:100%">
-    <tr><th>File on the host</th><th>Layers</th>${hosts.map((h) => `<th class="mono" style="font-size:11.5px">${esc(h)}</th>`).join("")}</tr>
+    <tr><th>${C.b.deployable ? "File on the host" : "File"}</th><th>Layers</th>${hosts.map((h) => `<th class="mono" style="font-size:11.5px">${esc(h)}</th>`).join("")}</tr>
     ${files.map((f) => `<tr data-rel="${esc(f.rel)}" class="${C.file === f.rel ? "on" : ""}">
       <td><span class="mono">${esc(f.out)}</span>${f.out !== f.rel ? ` <span class="muted" style="font-size:11.5px">from ${esc(f.rel)}</span>` : ""}
         <div class="muted" style="font-size:11.5px">${f.merge === "keys" ? "merged by key" : "whole file"}</div></td>
