@@ -33,6 +33,8 @@ COMPONENTS = {
     "omp-binary": "omp installed if missing; old npm copies removed",
     "netbird": "NetBird client joined with a setup key (new machines)",
     "paseo-deploy": "Host in the Paseo deploy inventory (build once, copy)",
+    "docker": "Docker Engine and the docker group (hosts with docker.enabled)",
+    "browser": "Shared Chrome + Selkies live view + CDP proxy (hosts with browser.enabled)",
 }
 RUNS = Path("~/.config/flotilla/runs").expanduser()
 
@@ -67,6 +69,10 @@ def _component_data(component: str, r: Rendered, hdir: Path,
         path.write_text(key)
         path.chmod(0o600)
         return {"setup_key_file": str(path)}
+    if component == "docker":
+        return {"enabled": bool((v.get("docker") or {}).get("enabled"))}
+    if component == "browser":
+        return {"browser": v.get("browser") or {}, "address": host.address}
     if component == "omp-binary":
         return {"remove_npm_global":
                 (v.get("omp") or {}).get("remove_npm_global") or []}

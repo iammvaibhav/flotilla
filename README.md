@@ -4,7 +4,7 @@ Manage a small fleet of machines on a NetBird network from one place: SSH betwee
 
 - **Hosts**: live status of every machine (versions, GitHub login, NetBird, disk, load) and a click-to-run command drawer.
 - **Config**: the state directory exactly as it is on the controller, in a file tree and a code editor: create, edit and delete any file (a save that would break a bundle or `hosts.yaml` is refused). A bundle's overview lists its files with a label for every group or host that overrides one; click a name for base, a label for that override. A group or host file has **Diff vs base**: what it removes and adds, unsaved edits included (merged files are compared after merging; a host file as that host gets it). **Apply…** shows the diff for every host, then applies.
-- **Components**: plan or apply the installers per host or group: `ssh`, `github`, `toolchain`, `omp-binary`, `netbird`, `paseo-deploy`.
+- **Components**: plan or apply the installers per host or group: `ssh`, `github`, `toolchain`, `omp-binary`, `netbird`, `paseo-deploy`, `docker`, `browser`.
 
 Agents use it through the CLI and the `flotilla` skill (in the `skills` bundle, so every host has it).
 
@@ -86,6 +86,8 @@ Saving a file with a literal secret (a key named like `apiKey`, `token`, `secret
 |---|---|
 | `ssh` | Fleet key `~/.ssh/id_ed25519` (never overwrites a different key), `~/.ssh/config.d/flotilla.conf` with short names for every host, pinned host keys, an `Include` at the top of `~/.ssh/config`, and removal of retired keys (`ssh.remove_keyfiles`, `ssh.remove_pubkeys`). |
 | `toolchain` | uv and pnpm with release cooldowns (`exclude-newer`, `minimumReleaseAge`), links in `~/.local/bin`, Node through `pnpm runtime` on hosts with no node (nvm hosts keep theirs), and the pinned agent-browser native binary in `~/.local/bin`. |
+| `docker` | Docker Engine (get.docker.com, passwordless sudo) and the user in the `docker` group, on Linux hosts with `docker.enabled`. |
+| `browser` | Shared browser on hosts with `browser.enabled`: `lscr.io/linuxserver/chromium` (Chrome + Selkies live view) and a CDP proxy in `~/shared-chrome`, bound to the host's NetBird IP, no login or token. Leaves the profile in `~/shared-chrome/config` alone. A config change recreates the container, which restarts Chrome. The `*.chrome.thevm.space` names and index page are prod's Caddy, not flotilla. |
 | `github` | `gh` (newest release older than 7 days), `gh` login from a vault token, git name and email per group. |
 | `omp-binary` | omp installed if missing; old npm-global copies removed (`omp.remove_npm_global`). |
 | `netbird` | Installs NetBird and joins with a setup key on machines that are not connected yet. Connected peers are not touched. |
