@@ -8,6 +8,10 @@ Wayland desktop, the Selkies web viewer and a watchdog) with docker compose in
   <name>.chrome.thevm.space in front of it). No login.
 - CDP: http on <NetBird IP>:9223 through a Caddy sidecar. No token.
   NetBird is the only access control for both.
+- Desktop: a fixed ``browser.width`` x ``browser.height`` at 96 DPI that every
+  viewer scales. Left to Selkies, each full viewer resizes the shared desktop
+  and its DPI to its own screen: a portrait tablet turns it vertical for
+  everyone, and a viewer watching through a resize can get only a corner of it.
 - The profile (cookies, logins) is in ``~/shared-chrome/config`` and is never
   touched here: each host's browser keeps its own logins and its own IP.
 
@@ -47,6 +51,10 @@ services:
       TZ: {tz}
       # The image's watchdog relaunches Chromium whenever it exits.
       RESTART_APP: "true"
+      # A fixed desktop that every viewer scales; see the module docstring.
+      SELKIES_MANUAL_WIDTH: "{width}"
+      SELKIES_MANUAL_HEIGHT: "{height}"
+      SELKIES_SCALING_DPI: "96"
       CHROME_CLI: >-
         --user-data-dir=/config/shared-profile
         --remote-debugging-port=9222
@@ -106,6 +114,7 @@ else:
     compose = COMPOSE.format(
         image=br["image"], caddy_image=br["caddy_image"], tz=br["timezone"],
         mem_limit=br["mem_limit"], allow_origin=br["allow_origin"],
+        width=br["width"], height=br["height"],
         address=d["address"], uid=fact("id -u"), gid=fact("id -g"))
     want = {"docker-compose.yml": compose, "Caddyfile": CADDYFILE}
 
