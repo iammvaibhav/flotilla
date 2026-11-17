@@ -59,17 +59,17 @@ after_apply: paseo daemon reload --home ~/.paseo   # on hosts that changed
 
 Bundles today: `omp` (`~/.omp/agent`: settings, models, account routing, agents, rules, and the fleet `AGENTS.md`), `skills` (`~/.agents/skills`), `paseo` (agent providers, visible models, memory and the daemon's appended system prompt in `~/.paseo/config.json`).
 
-### Values from another repository
+### Long text values
 
-When another repository owns some text (Paseo's appended system prompt lives in the Paseo repo, which its own deploy also reads), a keys-merged file points at it instead of holding a copy:
+A config key that holds long text (Paseo's appended system prompt) is easier to edit as its own file than as one YAML string. A keys-merged file names the file instead of holding the text:
 
 ```yaml
 daemon:
   appendSystemPrompt:
-    $file: github:iammvaibhav/paseo@vaibhav/customizations:scripts/paseo-system-prompt.md
+    $file: append-system-prompt.md
 ```
 
-The value becomes the file's text at that ref, with surrounding whitespace removed. The controller reads it with `gh api` when it compiles the bundle (cached for a minute), so a push to that branch reaches the hosts on the next apply. `flotilla show --explain` lists the source next to the layer that set it.
+The path is relative to the bundle folder (`bundles/paseo/append-system-prompt.md`), next to `bundle.yaml` and outside the layers, so the file itself is never copied to hosts. The value becomes the file's text with surrounding whitespace removed. `flotilla show --explain` lists the file next to the layer that set the key.
 
 ### Sync
 

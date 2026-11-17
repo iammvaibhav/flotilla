@@ -1,5 +1,4 @@
 import json
-import subprocess
 
 import pytest
 import yaml
@@ -221,36 +220,30 @@ def test_compare_shows_what_a_layer_changes_from_base(tmp_path):
     assert changed(notes["diff"]) == ["-two", "+three"]
 
 
-def test_file_values_come_from_github_and_name_their_source(tmp_path,
-                                                            monkeypatch):
-    calls = []
-
-    def fake_run(args, **kw):
-        calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "\n# Prompt\n\ntext\n", "")
-
-    monkeypatch.setattr(includes.subprocess, "run", fake_run)
-    monkeypatch.setattr(includes, "_cache", {})
+def test_file_values_come_from_the_bundle_folder_and_name_it(tmp_path):
     fleet = _fleet()
-    source = "github:o/r@team/main:docs/prompt.md"
     b = _bundle(tmp_path, {"dest": "~/x", "files": [
         {"match": "*.yml", "merge": "keys"}]}, {
-        "base/c.yml": f"d:\n  prompt:\n    $file: {source}\n  k: 1\n",
+        "prompt.md": "\n# Prompt\n\ntext\n",
+        "base/c.yml": "d:\n  prompt:\n    $file: prompt.md\n  k: 1\n",
         "groups/work/c.yml": "d.k: 2\n",
     })
     for name in ("one", "two"):      # one layer as is; merged with work
-        f = bundles.compile_bundle(b, fleet.host(name), fleet).files["c.yml"]
+        comp = bundles.compile_bundle(b, fleet.host(name), fleet)
+        assert "prompt.md" not in comp.files   # never copied to hosts
+        f = comp.files["c.yml"]
         assert yaml.safe_load(f.text)["d"]["prompt"] == "# Prompt\n\ntext"
         by_key = {row["key"]: row["sources"] for row in f.explain}
-        assert by_key["d.prompt"] == ["base", source]
-    assert len(calls) == 1           # cached across hosts
-    assert calls[0][-1] == "repos/o/r/contents/docs/prompt.md?ref=team%2Fmain"
+        assert by_key["d.prompt"] == ["base", "bundles/b/prompt.md"]
 
 
-def test_bad_file_source_is_a_bundle_error(tmp_path):
+@pytest.mark.parametrize("ref, error", [("../../etc/passwd", "not a path"),
+                                        ("/etc/passwd", "not a path"),
+                                        ("gone.md", "does not exist")])
+def test_bad_file_value_is_a_bundle_error(tmp_path, ref, error):
     fleet = _fleet()
     b = _bundle(tmp_path, {"dest": "~/x", "files": [
         {"match": "*.yml", "merge": "keys"}]}, {
-        "base/c.yml": "p:\n  $file: /etc/passwd\n"})
-    with pytest.raises(bundles.BundleError, match="github:<owner>"):
+        "base/c.yml": f"p:\n  $file: {ref}\n"})
+    with pytest.raises(bundles.BundleError, match=error):
         bundles.compile_bundle(b, fleet.host("one"), fleet)

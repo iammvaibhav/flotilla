@@ -1,42 +1,27 @@
-"""Values read from a file in a GitHub repository.
+"""Values read from a text file in the bundle folder.
 
-A value in a keys-merged state file can be the text of a file that lives in
-another repository, so that repository keeps the only copy::
+Long text that a program keeps in a config key (Paseo's appended system
+prompt) is easier to edit as its own file than as one YAML string. A value
+in a keys-merged state file can name such a file::
 
     daemon:
       appendSystemPrompt:
-        $file: github:iammvaibhav/paseo@vaibhav/customizations:scripts/paseo-system-prompt.md
+        $file: append-system-prompt.md
 
-The value becomes the file's text with surrounding whitespace removed. The
-controller reads the file at ``<ref>`` with ``gh api`` (the fleet GitHub
-login) when it compiles the bundle, so a push to that branch reaches the
-hosts on the next apply. ``flotilla show --explain`` lists the file as the
-value's source.
+The path is relative to the bundle folder (``bundles/paseo/``), next to
+``bundle.yaml`` and outside the layers, so the file itself is never copied
+to hosts. The value becomes the file's text with surrounding whitespace
+removed. ``flotilla show --explain`` lists the file as the value's source.
 """
 
 from __future__ import annotations
 
-import os
-import re
-import subprocess
-import threading
-import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from . import layers
 
 KEY = "$file"
-SOURCE = re.compile(r"^github:(?P<repo>[\w.-]+/[\w.-]+)@(?P<ref>[^:\s]+)"
-                    r":(?P<path>\S+)$")
-# The web app compiles bundles on every save and re-plans in the background;
-# one read per file per minute is enough there.
-TTL = 60.0
-
-_cache: dict[str, tuple[float, str]] = {}
-# Hosts compile in parallel threads; the first one reads, the rest hit cache.
-_lock = threading.Lock()
 
 
 class IncludeError(ValueError):
@@ -57,52 +42,38 @@ def present(data: Any) -> bool:
     return False
 
 
-def read(source: str) -> str:
-    """The text of ``github:<owner>/<repo>@<ref>:<path>``, stripped."""
-    m = SOURCE.match(source) if isinstance(source, str) else None
-    if not m:
-        raise IncludeError(f"{KEY}: {source!r} is not "
-                           f"github:<owner>/<repo>@<ref>:<path>")
-    with _lock:
-        hit = _cache.get(source)
-        if hit and time.monotonic() - hit[0] < TTL:
-            return hit[1]
-        url = (f"repos/{m['repo']}/contents/{quote(m['path'])}"
-               f"?ref={quote(m['ref'], safe='')}")
-        env = {**os.environ, "PATH": f"{Path('~/.local/bin').expanduser()}:"
-               f"{os.environ.get('PATH', '')}"}
-        try:
-            out = subprocess.run(
-                ["gh", "api", "-H", "Accept: application/vnd.github.raw+json",
-                 url], capture_output=True, text=True, env=env, timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise IncludeError(f"cannot read {source}: {exc}") from exc
-        if out.returncode != 0:
-            raise IncludeError(f"cannot read {source}: "
-                               f"{out.stderr.strip()[-300:]}")
-        text = out.stdout.strip()
-        _cache[source] = (time.monotonic(), text)
-        return text
+def read(root: Path, rel: Any) -> str:
+    """The stripped text of ``rel`` in the bundle folder ``root``."""
+    if not isinstance(rel, str) or not rel or rel.startswith("/") \
+            or ".." in rel.split("/"):
+        raise IncludeError(f"{KEY}: {rel!r} is not a path in the bundle "
+                           f"folder")
+    path = root / rel
+    try:
+        return path.read_text().strip()
+    except FileNotFoundError:
+        raise IncludeError(f"{KEY}: {rel} does not exist") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise IncludeError(f"{KEY}: cannot read {rel}: {exc}") from exc
 
 
-def expand(data: Any, prov: dict[layers.Path, list[str]],
-           path: layers.Path = ()) -> Any:
-    """``data`` with every ``{$file: source}`` replaced by the file's text.
+def expand(data: Any, prov: dict[layers.Path, list[str]], root: Path,
+           label: str, path: layers.Path = ()) -> Any:
+    """``data`` with every ``{$file: rel}`` replaced by the file's text.
 
-    The value's provenance becomes the layers that set ``$file`` plus the
-    source, so ``--explain`` names the file.
+    The value's provenance becomes the layers that set ``$file`` plus
+    ``<label>/<rel>``, so ``--explain`` names the file.
     """
     if is_include(data):
-        source = data[KEY]
-        text = read(source)
+        rel = data[KEY]
+        text = read(root, rel)
         setters = prov.pop(path + (KEY,), None) or prov.get(path) or []
-        prov[path] = [*setters, source]
+        prov[path] = [*setters, f"{label}/{rel}"]
         return text
     if isinstance(data, dict):
-        return {k: expand(v, prov, path + (str(k),)) for k, v in data.items()}
-    if isinstance(data, list):
-        if present(data):
-            raise IncludeError(f"{'.'.join(path)}: {KEY} only works as a "
-                               f"map value, not inside a list")
-        return data
+        return {k: expand(v, prov, root, label, path + (str(k),))
+                for k, v in data.items()}
+    if isinstance(data, list) and present(data):
+        raise IncludeError(f"{'.'.join(path)}: {KEY} only works as a map "
+                           f"value, not inside a list")
     return data

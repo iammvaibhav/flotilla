@@ -18,8 +18,8 @@ them), the host. The same path in a higher layer wins:
 - A file that only one layer has is written exactly as it is.
 - ``name.j2`` is a Jinja template rendered per host into ``name``.
 - ``name.json.yml`` is YAML (comments allowed) written as ``name.json``.
-- ``{$file: github:<owner>/<repo>@<ref>:<path>}`` as a value in a keys-merged
-  file becomes that file's text (see :mod:`flotilla.includes`).
+- ``{$file: name.md}`` as a value in a keys-merged file becomes the text of
+  ``name.md`` in the bundle folder (see :mod:`flotilla.includes`).
 - ``_layer.yml`` in a layer lists items that layer ``skip``s (not written
   there, left alone on the host) or ``delete``s (removed from the host).
 
@@ -410,7 +410,8 @@ def _compile_file(bundle: Bundle, rel: str, vs: list[tuple[str, str]],
                 layers.leaves(data, first_layer, prov)
                 return OutFile(target, first_text, [first_layer], data,
                                layers.explain(data, prov), rule.own_keys)
-        data = includes.expand(merge_versions(rel, vs, prov), prov)
+        data = includes.expand(merge_versions(rel, vs, prov), prov,
+                               bundle.root, bundle.prefix)
     except (layers.LayerError, includes.IncludeError) as exc:
         raise BundleError(f"{bundle.name}/{rel}: {exc}") from exc
     return OutFile(target, dump(target, data), [lid for lid, _ in vs], data,
