@@ -18,6 +18,8 @@ them), the host. The same path in a higher layer wins:
 - A file that only one layer has is written exactly as it is.
 - ``name.j2`` is a Jinja template rendered per host into ``name``.
 - ``name.json.yml`` is YAML (comments allowed) written as ``name.json``.
+- ``{$file: github:<owner>/<repo>@<ref>:<path>}`` as a value in a keys-merged
+  file becomes that file's text (see :mod:`flotilla.includes`).
 - ``_layer.yml`` in a layer lists items that layer ``skip``s (not written
   there, left alone on the host) or ``delete``s (removed from the host).
 
@@ -56,7 +58,7 @@ from typing import Any, Iterator
 import jinja2
 import yaml
 
-from . import layers, remote
+from . import includes, layers, remote
 from .secrets import REF_IN_TEXT, Resolver
 from .state import Fleet, Host, dump_file, load_fleet, state_dir
 
@@ -403,13 +405,13 @@ def _compile_file(bundle: Bundle, rel: str, vs: list[tuple[str, str]],
         first_layer, first_text = vs[0]
         if len(vs) == 1 and target == rel:
             data = parse(rel, first_text)
-            if not layers.has_ops(data):
+            if not layers.has_ops(data) and not includes.present(data):
                 # One layer, plain file: written exactly as it is.
                 layers.leaves(data, first_layer, prov)
                 return OutFile(target, first_text, [first_layer], data,
                                layers.explain(data, prov), rule.own_keys)
-        data = merge_versions(rel, vs, prov)
-    except layers.LayerError as exc:
+        data = includes.expand(merge_versions(rel, vs, prov), prov)
+    except (layers.LayerError, includes.IncludeError) as exc:
         raise BundleError(f"{bundle.name}/{rel}: {exc}") from exc
     return OutFile(target, dump(target, data), [lid for lid, _ in vs], data,
                    layers.explain(data, prov), rule.own_keys)
