@@ -40,7 +40,7 @@ Layers apply in order: `base`, the host's groups (in the order the host lists th
 - Other files are replaced whole by the most specific layer that has them.
 - A file that only one layer has is written exactly as it is (comments kept).
 - `name.j2` is a Jinja template rendered per host into `name` (`me` is the host, `hosts` the managed hosts). `name.json.yml` is YAML, with comments, written as `name.json`.
-- `_layer.yml` in a layer: `skip: [item]` does not place an item there and leaves it alone on the host; `delete: [item]` removes it from those hosts.
+- `_layer.yml` in a layer: `skip: [item]` does not place an item there and leaves it alone on the host; `delete: [item]` removes it from those hosts; `overlay: [item]` (directory bundles) lays that layer's files of the item over the folder the lower layers give, instead of replacing the folder whole, so an override can change one file of a skill.
 
 `bundle.yaml`:
 

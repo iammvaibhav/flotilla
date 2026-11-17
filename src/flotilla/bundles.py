@@ -277,7 +277,7 @@ def layer_files(d: Path) -> dict[str, str | bytes]:
 
 
 def layer_manifest(d: Path) -> dict[str, list[str]]:
-    """The ``skip`` and ``delete`` lists of a layer's ``_layer.yml``."""
+    """The ``skip``, ``delete`` and ``overlay`` lists of a layer's ``_layer.yml``."""
     path = d / LAYER_FILE
     where = f"{d.name}/{LAYER_FILE}"
     try:
@@ -286,9 +286,10 @@ def layer_manifest(d: Path) -> dict[str, list[str]]:
         raise BundleError(f"{where}: {exc}") from exc
     data = data or {}
     if not isinstance(data, dict):
-        raise BundleError(f"{where} must be a map with skip and delete lists")
+        raise BundleError(f"{where} must be a map with skip, delete and "
+                          f"overlay lists")
     out = {}
-    for kind in ("skip", "delete"):
+    for kind in ("skip", "delete", "overlay"):
         items = data.get(kind) or []
         if not isinstance(items, list) or \
                 not all(isinstance(i, str) for i in items):
@@ -352,15 +353,20 @@ def compile_bundle(bundle: Bundle, host: Host,
     state: dict[str, str] = {}
     for layer_id in bundle.layer_ids(host):
         d = bundle.layer_dir(layer_id)
+        manifest = layer_manifest(d)
+        overlay = set(manifest["overlay"])
         by_item: dict[str, dict[str, str]] = {}
         for rel, text in layer_files(d).items():
             by_item.setdefault(_item(bundle, rel), {})[rel] = text
         for item, fs in by_item.items():
-            if state.get(item) != "present":
+            # A directory item is replaced whole by the most specific layer,
+            # unless that layer lists it under ``overlay``: then its files
+            # are laid over the folder the lower layers give.
+            if state.get(item) != "present" or (
+                    bundle.unit == "directory" and item not in overlay):
                 versions[item] = []
             versions[item].append((layer_id, fs))
             state[item] = "present"
-        manifest = layer_manifest(d)
         for kind in ("skip", "delete"):
             for item in manifest[kind]:
                 state[item] = kind
@@ -375,9 +381,12 @@ def compile_bundle(bundle: Bundle, host: Host,
                               else out_name(item))
     for item, vs in versions.items():
         if bundle.unit == "directory":
-            layer_id, fs = vs[-1]
-            out.items[item] = layer_id
-            for rel, text in fs.items():
+            out.items[item] = vs[-1][0]
+            merged: dict[str, tuple[str, str]] = {}
+            for layer_id, fs in vs:
+                for rel, text in fs.items():
+                    merged[rel] = (layer_id, text)
+            for rel, (layer_id, text) in merged.items():
                 out.files[rel] = OutFile(rel, text, [layer_id])
         else:
             f = _compile_file(bundle, item, [(lid, fs[item]) for lid, fs in vs],

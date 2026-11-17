@@ -133,6 +133,28 @@ def test_directory_items_skip_delete_and_replace_whole(tmp_path):
     assert "gamma/SKILL.md" not in two.files
 
 
+def test_directory_overlay_lays_override_files_over_the_lower_folder(tmp_path):
+    fleet = _fleet()
+    b = _bundle(tmp_path, {"dest": "~/skills", "unit": "directory"}, {
+        "base/alpha/SKILL.md": "alpha\n",
+        "base/alpha/engine.py": "engine\n",
+        "base/alpha/account.json": "personal\n",
+        "groups/work/alpha/account.json": "work\n",
+        "groups/work/_layer.yml": "overlay: [alpha]\n",
+        "hosts/one/alpha/SKILL.md": "alpha for one\n",
+    })
+    two = bundles.compile_bundle(b, fleet.host("two"), fleet)
+    # Only account.json comes from the overlay layer; the rest from base.
+    assert {r: f.text for r, f in two.files.items()} == {
+        "alpha/SKILL.md": "alpha\n", "alpha/engine.py": "engine\n",
+        "alpha/account.json": "work\n"}
+    assert two.files["alpha/account.json"].sources == ["group:work"]
+    assert two.files["alpha/engine.py"].sources == ["base"]
+    one = bundles.compile_bundle(b, fleet.host("one"), fleet)
+    # A layer without overlay still replaces the folder whole.
+    assert sorted(one.files) == ["alpha/SKILL.md"]
+
+
 def test_set_and_clear_override_keep_the_rest_of_the_file(tmp_path):
     fleet = _fleet()
     b = _bundle(tmp_path, {"dest": "~/x", "files": [
